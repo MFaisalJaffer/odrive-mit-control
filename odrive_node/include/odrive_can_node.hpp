@@ -7,6 +7,7 @@
 #include "odrive_can/msg/controller_status.hpp"
 #include "odrive_can/msg/control_message.hpp"
 #include "odrive_can/srv/axis_state.hpp"
+#include "odrive_can/srv/set_limits.hpp"
 #include "std_srvs/srv/empty.hpp"
 #include "socket_can.hpp"
 
@@ -25,6 +26,7 @@ using ControllerStatus = odrive_can::msg::ControllerStatus;
 using ControlMessage = odrive_can::msg::ControlMessage;
 
 using AxisState = odrive_can::srv::AxisState;
+using SetLimits = odrive_can::srv::SetLimits;
 using Empty = std_srvs::srv::Empty;
 
 class ODriveCanNode : public rclcpp::Node {
@@ -37,8 +39,10 @@ private:
     void subscriber_callback(const ControlMessage::SharedPtr msg);
     void service_callback(const std::shared_ptr<AxisState::Request> request, std::shared_ptr<AxisState::Response> response);
     void service_clear_errors_callback(const std::shared_ptr<Empty::Request> request, std::shared_ptr<Empty::Response> response);
+    void service_set_limits_callback(const std::shared_ptr<SetLimits::Request> request, std::shared_ptr<SetLimits::Response> response);
     void request_state_callback();
     void request_clear_errors_callback();
+    void request_set_limits_callback();
     void ctrl_msg_callback();
     inline bool verify_length(const std::string&name, uint8_t expected, uint8_t length);
     
@@ -69,6 +73,12 @@ private:
 
     EpollEvent srv_clear_errors_evt_;
     rclcpp::Service<Empty>::SharedPtr service_clear_errors_;
+
+    EpollEvent srv_set_limits_evt_;
+    float velocity_limit_;
+    float current_limit_;
+    std::mutex limits_mutex_;
+    rclcpp::Service<SetLimits>::SharedPtr service_set_limits_;
 
 };
 

@@ -4,16 +4,20 @@
 #include "byte_swap.hpp"
 #include <sys/eventfd.h>
 #include <chrono>
+#include <algorithm>
+#include <cstdint>
 
 enum CmdId : uint32_t {
     kHeartbeat = 0x001,            // ControllerStatus  - publisher
     kGetError = 0x003,             // SystemStatus      - publisher
     kSetAxisState = 0x007,         // SetAxisState      - service
+    kMITControl = 0x008,           // MIT Control       - subscriber
     kGetEncoderEstimates = 0x009,  // ControllerStatus  - publisher
     kSetControllerMode = 0x00b,    // ControlMessage    - subscriber
     kSetInputPos,                  // ControlMessage    - subscriber
     kSetInputVel,                  // ControlMessage    - subscriber
     kSetInputTorque,               // ControlMessage    - subscriber
+    kSetLimits = 0x00F,            // SetLimits         - service
     kGetIq = 0x014,                // ControllerStatus  - publisher
     kGetTemp,                      // SystemStatus      - publisher
     kGetBusVoltageCurrent = 0x017, // SystemStatus      - publisher
@@ -21,11 +25,57 @@ enum CmdId : uint32_t {
     kGetTorques = 0x01c,           // ControllerStatus  - publisher
 };
 
+// MIT Control Protocol Constants (SteadyWin GIM6010-8)
+// Reference: SteadyWin GIM6010-8 Motor Manual rev2.2 - CAN MIT Protocol
+// Command scaling (for sending commands)
+constexpr float MIT_P_MIN = -12.5f;    // Minimum position [rad]
+constexpr float MIT_P_MAX = 12.5f;     // Maximum position [rad]
+constexpr float MIT_V_MIN = -45.0f;    // Minimum velocity [rad/s]
+constexpr float MIT_V_MAX = 45.0f;     // Maximum velocity [rad/s]
+constexpr float MIT_KP_MIN = 0.0f;     // Minimum Kp
+constexpr float MIT_KP_MAX = 500.0f;   // Maximum Kp
+constexpr float MIT_KD_MIN = 0.0f;     // Minimum Kd
+constexpr float MIT_KD_MAX = 5.0f;     // Maximum Kd
+constexpr float MIT_T_MIN = -18.0f;    // Minimum torque [Nm]
+constexpr float MIT_T_MAX = 18.0f;     // Maximum torque [Nm]
+
+// MIT Feedback scaling (from DBC file - Axis0_Mit_Feedback)
+// Fb_Position: 16 bits, scale 0.000381, offset -12.5, range [-12.5, 12.5] rad
+// Fb_Velocity: 12 bits, scale 0.03175, offset -65, range [-65, 65] rad/s
+// Fb_Torque:   12 bits, scale 0.02442, offset -50, range [-50, 50] Nm
+constexpr float MIT_FB_POS_SCALE = 0.000381f;
+constexpr float MIT_FB_POS_OFFSET = -12.5f;
+constexpr float MIT_FB_VEL_SCALE = 0.03175f;
+constexpr float MIT_FB_VEL_OFFSET = -65.0f;
+constexpr float MIT_FB_TRQ_SCALE = 0.02442f;
+constexpr float MIT_FB_TRQ_OFFSET = -50.0f;
+
+// MIT Protocol helper functions
+inline float clamp(float val, float min_val, float max_val) {
+    return std::max(min_val, std::min(max_val, val));
+}
+
+// Convert float to unsigned int with linear scaling
+inline uint16_t float_to_uint(float x, float x_min, float x_max, uint8_t bits) {
+    float span = x_max - x_min;
+    float offset = x_min;
+    x = clamp(x, x_min, x_max);
+    return (uint16_t)((x - offset) * ((float)((1 << bits) - 1)) / span);
+}
+
+// Convert unsigned int to float with linear scaling
+inline float uint_to_float(uint16_t x_int, float x_min, float x_max, uint8_t bits) {
+    float span = x_max - x_min;
+    float offset = x_min;
+    return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
+}
+
 enum ControlMode : uint64_t {
     kVoltageControl,
     kTorqueControl,
     kVelocityControl,
     kPositionControl,
+    kMITControlMode,  // MIT Control Mode (SteadyWin GIM6010-8)
 };
 
 ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_name) {
@@ -57,6 +107,7 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
 
     service_ = rclcpp::Node::create_service<AxisState>("request_axis_state", std::bind(&ODriveCanNode::service_callback, this, _1, _2), srv_qos_profile);
     service_clear_errors_ = rclcpp::Node::create_service<Empty>("clear_errors", std::bind(&ODriveCanNode::service_clear_errors_callback, this, _1, _2), srv_qos_profile);
+    service_set_limits_ = rclcpp::Node::create_service<SetLimits>("set_limits", std::bind(&ODriveCanNode::service_set_limits_callback, this, _1, _2), srv_qos_profile);
 }
 
 void ODriveCanNode::deinit() {
@@ -93,6 +144,10 @@ bool ODriveCanNode::init(EpollEventLoop* event_loop) {
     }
     if (!srv_clear_errors_evt_.init(event_loop, std::bind(&ODriveCanNode::request_clear_errors_callback, this))) {
         RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize clear errors service event");
+        return false;
+    }
+    if (!srv_set_limits_evt_.init(event_loop, std::bind(&ODriveCanNode::request_set_limits_callback, this))) {
+        RCLCPP_ERROR(rclcpp::Node::get_logger(), "Failed to initialize set limits service event");
         return false;
     }
     RCLCPP_INFO(rclcpp::Node::get_logger(), "node_id: %d", node_id_);
@@ -164,6 +219,42 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
             ctrl_pub_flag_ |= 0b1000; 
             break;
         }
+        case CmdId::kMITControl: {
+            // MIT Control Feedback (SteadyWin GIM6010-8 Motor)
+            // Reference: SteadyWin GIM6010-8 Motor Manual rev2.2 - CAN MIT Protocol
+            // DBC: BO_ 8 Axis0_Mit_Feedback: 6 ODrive_Axis0
+            //
+            // MIT feedback format (6 bytes, big-endian/Motorola):
+            // Fb_Node_ID:  Byte 0 [7:0]           - 8 bits
+            // Fb_Position: Byte 1-2 [15:0]        - 16 bits, scale 0.000381, offset -12.5
+            // Fb_Velocity: Byte 3[7:0], 4[7:4]    - 12 bits, scale 0.03175, offset -65
+            // Fb_Torque:   Byte 4[3:0], 5[7:0]    - 12 bits, scale 0.02442, offset -50
+            if (!verify_length("kMITControl", 6, frame.can_dlc)) break;
+            
+            uint8_t motor_id = frame.data[0];
+            uint16_t p_int = ((uint16_t)frame.data[1] << 8) | frame.data[2];
+            uint16_t v_int = ((uint16_t)frame.data[3] << 4) | ((frame.data[4] >> 4) & 0x0F);
+            uint16_t t_int = (((uint16_t)frame.data[4] & 0x0F) << 8) | frame.data[5];
+            
+            // Apply DBC scaling: physical_value = raw_value * scale + offset
+            float pos = (float)p_int * MIT_FB_POS_SCALE + MIT_FB_POS_OFFSET;
+            float vel = (float)v_int * MIT_FB_VEL_SCALE + MIT_FB_VEL_OFFSET;
+            float torque = (float)t_int * MIT_FB_TRQ_SCALE + MIT_FB_TRQ_OFFSET;
+            
+            RCLCPP_INFO(rclcpp::Node::get_logger(), 
+                "MIT feedback: motor_id=%d pos=%.3f rad vel=%.3f rad/s torque=%.3f Nm",
+                motor_id, pos, vel, torque);
+            
+            {
+                std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
+                ctrl_stat_.pos_estimate = pos;
+                ctrl_stat_.vel_estimate = vel;
+                ctrl_stat_.torque_estimate = torque;
+            }
+            // Publish immediately for MIT mode (don't wait for other CAN messages)
+            ctrl_publisher_->publish(ctrl_stat_);
+            break;
+        }
         case CmdId::kSetAxisState:
         case CmdId::kSetControllerMode:
         case CmdId::kSetInputPos:
@@ -190,6 +281,10 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
 }
 
 void ODriveCanNode::subscriber_callback(const ControlMessage::SharedPtr msg) {
+    RCLCPP_INFO(rclcpp::Node::get_logger(), 
+        "Received control_message: mode=%u pos=%.3f vel=%.3f torque=%.3f kp=%.3f kd=%.3f",
+        msg->control_mode, msg->input_pos, msg->input_vel, msg->input_torque, 
+        msg->input_kp, msg->input_kd);
     std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
     ctrl_msg_ = *msg;
     sub_evt_.set();
@@ -226,6 +321,18 @@ void ODriveCanNode::service_clear_errors_callback(const std::shared_ptr<Empty::R
     srv_clear_errors_evt_.set();
 }
 
+void ODriveCanNode::service_set_limits_callback(const std::shared_ptr<SetLimits::Request> request, std::shared_ptr<SetLimits::Response> response) {
+    {
+        std::lock_guard<std::mutex> guard(limits_mutex_);
+        velocity_limit_ = request->velocity_limit;
+        current_limit_ = request->current_limit;
+        RCLCPP_INFO(rclcpp::Node::get_logger(), "Setting limits: velocity=%.2f rev/s, current=%.2f A", 
+            velocity_limit_, current_limit_);
+    }
+    srv_set_limits_evt_.set();
+    response->success = true;
+}
+
 void ODriveCanNode::request_state_callback() {
     uint32_t axis_state;
     {
@@ -258,21 +365,47 @@ void ODriveCanNode::request_clear_errors_callback() {
     can_intf_.send_can_frame(frame);
 }
 
+void ODriveCanNode::request_set_limits_callback() {
+    float vel_limit, cur_limit;
+    {
+        std::lock_guard<std::mutex> guard(limits_mutex_);
+        vel_limit = velocity_limit_;
+        cur_limit = current_limit_;
+    }
+    
+    struct can_frame frame;
+    frame.can_id = node_id_ << 5 | CmdId::kSetLimits;
+    write_le<float>(vel_limit, frame.data);        // Velocity limit [rev/s]
+    write_le<float>(cur_limit, frame.data + 4);    // Current limit [A]
+    frame.can_dlc = 8;
+    can_intf_.send_can_frame(frame);
+    
+    RCLCPP_DEBUG(rclcpp::Node::get_logger(), "Sent limits CAN frame: vel=%.2f, cur=%.2f", vel_limit, cur_limit);
+}
+
 void ODriveCanNode::ctrl_msg_callback() {
 
     uint32_t control_mode;
     struct can_frame frame;
-    frame.can_id = node_id_ << 5 | kSetControllerMode;
+    
     {
         std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
-        write_le<uint32_t>(ctrl_msg_.control_mode, frame.data);
-        write_le<uint32_t>(ctrl_msg_.input_mode,   frame.data + 4);
         control_mode = ctrl_msg_.control_mode;
     }
-    frame.can_dlc = 8;
-    can_intf_.send_can_frame(frame);
     
-    frame = can_frame{};
+    // MIT control uses its own protocol - skip kSetControllerMode for MIT
+    if (control_mode != ControlMode::kMITControlMode) {
+        frame.can_id = node_id_ << 5 | kSetControllerMode;
+        {
+            std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
+            write_le<uint32_t>(ctrl_msg_.control_mode, frame.data);
+            write_le<uint32_t>(ctrl_msg_.input_mode,   frame.data + 4);
+        }
+        frame.can_dlc = 8;
+        can_intf_.send_can_frame(frame);
+        frame = can_frame{};
+    }
+    
     switch (control_mode) {
         case ControlMode::kVoltageControl: {
             RCLCPP_ERROR(rclcpp::Node::get_logger(), "Voltage Control Mode (0) is not currently supported");
@@ -304,7 +437,57 @@ void ODriveCanNode::ctrl_msg_callback() {
             write_le<int8_t>(((int8_t)((ctrl_msg_.input_torque) * 1000)), frame.data + 6);
             frame.can_dlc = 8;
             break;
-        }    
+        }
+        case ControlMode::kMITControlMode: {
+            // MIT Control Mode (SteadyWin GIM6010-8 Motor)
+            // Reference: SteadyWin GIM6010-8 Motor Manual rev2.2 - CAN MIT Protocol
+            // 
+            // MIT protocol packs position, velocity, Kp, Kd, and torque into 8 bytes:
+            // Byte 0: position[15:8]
+            // Byte 1: position[7:0]
+            // Byte 2: velocity[11:4]
+            // Byte 3: velocity[3:0] | kp[11:8]
+            // Byte 4: kp[7:0]
+            // Byte 5: kd[11:4]
+            // Byte 6: kd[3:0] | torque[11:8]
+            // Byte 7: torque[7:0]
+            RCLCPP_DEBUG(rclcpp::Node::get_logger(), "MIT control mode");
+            
+            // MIT Control CAN ID: (node_id << 5) | kMITControl
+            frame.can_id = node_id_ << 5 | kMITControl;
+            
+            uint16_t p_int, v_int, kp_int, kd_int, t_int;
+            {
+                std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
+                // Convert float values to unsigned integers with proper scaling
+                p_int = float_to_uint(ctrl_msg_.input_pos, MIT_P_MIN, MIT_P_MAX, 16);
+                v_int = float_to_uint(ctrl_msg_.input_vel, MIT_V_MIN, MIT_V_MAX, 12);
+                kp_int = float_to_uint(ctrl_msg_.input_kp, MIT_KP_MIN, MIT_KP_MAX, 12);
+                kd_int = float_to_uint(ctrl_msg_.input_kd, MIT_KD_MIN, MIT_KD_MAX, 12);
+                t_int = float_to_uint(ctrl_msg_.input_torque, MIT_T_MIN, MIT_T_MAX, 12);
+            }
+            
+            // Pack data into CAN frame (big-endian format for MIT protocol)
+            frame.data[0] = (p_int >> 8) & 0xFF;           // position[15:8]
+            frame.data[1] = p_int & 0xFF;                   // position[7:0]
+            frame.data[2] = (v_int >> 4) & 0xFF;           // velocity[11:4]
+            frame.data[3] = ((v_int & 0x0F) << 4) | ((kp_int >> 8) & 0x0F);  // velocity[3:0] | kp[11:8]
+            frame.data[4] = kp_int & 0xFF;                  // kp[7:0]
+            frame.data[5] = (kd_int >> 4) & 0xFF;          // kd[11:4]
+            frame.data[6] = ((kd_int & 0x0F) << 4) | ((t_int >> 8) & 0x0F);  // kd[3:0] | torque[11:8]
+            frame.data[7] = t_int & 0xFF;                   // torque[7:0]
+            
+            frame.can_dlc = 8;
+            
+            RCLCPP_DEBUG(rclcpp::Node::get_logger(), 
+                "MIT cmd: pos=%.3f vel=%.3f kp=%.3f kd=%.3f torque=%.3f",
+                uint_to_float(p_int, MIT_P_MIN, MIT_P_MAX, 16),
+                uint_to_float(v_int, MIT_V_MIN, MIT_V_MAX, 12),
+                uint_to_float(kp_int, MIT_KP_MIN, MIT_KP_MAX, 12),
+                uint_to_float(kd_int, MIT_KD_MIN, MIT_KD_MAX, 12),
+                uint_to_float(t_int, MIT_T_MIN, MIT_T_MAX, 12));
+            break;
+        }
         default: 
             RCLCPP_ERROR(rclcpp::Node::get_logger(), "unsupported control_mode: %d", control_mode);
             return;

@@ -1,0 +1,9 @@
+# SetLimits service for ODrive CAN node
+# Sets velocity and current limits
+
+float32 velocity_limit  # Velocity limit [rev/s]
+float32 current_limit   # Current limit [A]
+---
+bool success
+
+

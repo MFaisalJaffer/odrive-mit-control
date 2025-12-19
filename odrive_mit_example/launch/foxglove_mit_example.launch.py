@@ -1,9 +1,9 @@
 from launch import LaunchDescription
-from launch.actions import RegisterEventHandler, DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.actions import RegisterEventHandler, DeclareLaunchArgument, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration, Command
 from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
-import xacro
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 import os
 from ament_index_python.packages import get_package_share_directory
 
@@ -20,16 +20,7 @@ def generate_launch_description():
     pkg_path = get_package_share_directory('odrive_mit_example')
     xacro_file = os.path.join(pkg_path, 'description', 'urdf', 'mit_robot.urdf.xacro')
     
-    # 2. Process the Xacro file (convert to XML)
-    # We delay processing until runtime to use the LaunchConfiguration, but standard xacro processing
-    # in launch files typically happens before Node definition if we use Python xacro bindings.
-    # To pass LaunchConfiguration to xacro, we usually need to use Command substitution or process conditionally.
-    # For simplicity here, we can re-process based on default or passed args if we weren't using LaunchConfiguration directly in Python.
-    # However, xacro.process_file doesn't accept LaunchConfiguration objects directly.
-    # We will use Command substitution which is the standard way to handle xacro with launch args in ROS 2.
-    
-    from launch.substitutions import Command, PathJoinSubstitution
-    
+    # 2. Process the Xacro file
     robot_description_content = Command([
         'xacro ', xacro_file, 
         ' use_mock_hardware:=', use_mock_hardware
@@ -73,9 +64,31 @@ def generate_launch_description():
         )
     )
 
+    # 7. Robot State Publisher (Required for Foxglove/RViz visualization)
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        output='screen',
+        parameters=[robot_description]
+    )
+
+    # 8. Foxglove Bridge
+    # Check if foxglove_bridge is installed or in workspace
+    # We will assume it is available as 'foxglove_bridge' package
+    foxglove_bridge = Node(
+        package='foxglove_bridge',
+        executable='foxglove_bridge',
+        name='foxglove_bridge',
+        output='screen',
+        parameters=[{'send_buffer_limit': 10000000}], # Optional parameter
+    )
+
     return LaunchDescription([
         declare_use_mock_hardware,
         control_node,
         joint_state_broadcaster,
         delayed_leg_controller,
+        robot_state_publisher,
+        foxglove_bridge
     ])
+

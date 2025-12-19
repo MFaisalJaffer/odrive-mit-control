@@ -1,52 +1,16 @@
 controller_manager:
   ros__parameters:
-    update_rate: 100  # Hz
+    update_rate: 1000  # 1kHz loop is standard for impedance control
+
+    leg_impedance_controller:
+      type: "my_robot_controllers/LegImpedanceController"
 
     joint_state_broadcaster:
-      type: joint_state_broadcaster/JointStateBroadcaster
+      type: "joint_state_broadcaster/JointStateBroadcaster"
 
-    mit_position_controller:
-      type: forward_command_controller/ForwardCommandController
-
-    mit_velocity_controller:
-      type: forward_command_controller/ForwardCommandController
-
-    mit_effort_controller:
-      type: forward_command_controller/ForwardCommandController
-
-    mit_kp_controller:
-      type: forward_command_controller/ForwardCommandController
-
-    mit_kd_controller:
-      type: forward_command_controller/ForwardCommandController
-
-mit_position_controller:
+leg_impedance_controller:
   ros__parameters:
     joints:
-      - joint0
-    interface_name: position
-
-mit_velocity_controller:
-  ros__parameters:
-    joints:
-      - joint0
-    interface_name: velocity
-
-mit_effort_controller:
-  ros__parameters:
-    joints:
-      - joint0
-    interface_name: effort
-
-mit_kp_controller:
-  ros__parameters:
-    joints:
-      - joint0
-    interface_name: kp
-
-mit_kd_controller:
-  ros__parameters:
-    joints:
-      - joint0
-    interface_name: kd
-
+      - hip_joint
+      - knee_joint
+      - ankle_joint

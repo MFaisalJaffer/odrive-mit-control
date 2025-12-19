@@ -1,7 +1,9 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mit_robot">
+  <xacro:arg name="use_mock_hardware" default="false"/>
 
-  <!-- Base Link -->
+  <link name="world"/>
+
   <link name="base_link">
     <visual>
       <geometry>
@@ -10,46 +12,105 @@
     </visual>
   </link>
 
-  <!-- Joint 0 -->
-  <joint name="joint0" type="revolute">
-    <parent link="base_link"/>
-    <child link="link0"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-1000" upper="1000" effort="100" velocity="100"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
   </joint>
 
-  <link name="link0">
+  <link name="hip_link">
     <visual>
       <geometry>
-        <cylinder length="0.05" radius="0.05"/>
+        <cylinder length="0.1" radius="0.05"/>
       </geometry>
     </visual>
   </link>
 
-  <!-- Control -->
-  <ros2_control name="ODriveMIT" type="system">
-    <hardware>
-      <plugin>odrive_ros2_control/ODriveHardwareInterface</plugin>
-      <param name="can">can0</param>
-    </hardware>
-    
-    <joint name="joint0">
+  <joint name="hip_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="hip_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="10.0"/>
+  </joint>
+
+  <link name="knee_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.1" radius="0.05"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="knee_joint" type="revolute">
+    <parent link="hip_link"/>
+    <child link="knee_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="10.0"/>
+  </joint>
+
+  <link name="ankle_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.1" radius="0.05"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="ankle_joint" type="revolute">
+    <parent link="knee_link"/>
+    <child link="ankle_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="10.0"/>
+  </joint>
+
+  <ros2_control name="LeftLegSystem" type="system">
+    <xacro:unless value="$(arg use_mock_hardware)">
+      <hardware>
+        <plugin>odrive_ros2_control_plugin/ODriveHardwareInterface</plugin>
+        <param name="can">can0</param>
+      </hardware>
+    </xacro:unless>
+    <xacro:if value="$(arg use_mock_hardware)">
+      <hardware>
+        <plugin>mock_components/GenericSystem</plugin>
+        <param name="calculate_dynamics">false</param>
+      </hardware>
+    </xacro:if>
+
+    <joint name="hip_joint">
       <param name="node_id">0</param>
-      
-      <!-- State Interfaces -->
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      
-      <!-- Command Interfaces for MIT Control -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
       <command_interface name="kp"/>
       <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="knee_joint">
+      <param name="node_id">1</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="ankle_joint">
+      <param name="node_id">2</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
   </ros2_control>
 
 </robot>
-

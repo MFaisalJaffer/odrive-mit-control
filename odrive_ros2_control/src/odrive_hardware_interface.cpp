@@ -392,18 +392,18 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
                 }
             }
         } break;
-        case Get_Encoder_Estimates_msg_t::cmd_id: {
-            if (Get_Encoder_Estimates_msg_t msg; try_decode(msg)) {
-                pos_estimate_ = msg.Pos_Estimate * (2 * M_PI);
-                vel_estimate_ = msg.Vel_Estimate * (2 * M_PI);
-            }
-        } break;
-        case Get_Torques_msg_t::cmd_id: {
-            if (Get_Torques_msg_t msg; try_decode(msg)) {
-                torque_target_ = msg.Torque_Target;
-                torque_estimate_ = msg.Torque_Estimate;
-            }
-        } break;
+        // case Get_Encoder_Estimates_msg_t::cmd_id: {
+        //     if (Get_Encoder_Estimates_msg_t msg; try_decode(msg)) {
+        //         pos_estimate_ = msg.Pos_Estimate * (2 * M_PI);
+        //         vel_estimate_ = msg.Vel_Estimate * (2 * M_PI);
+        //     }
+        // } break;
+        // case Get_Torques_msg_t::cmd_id: {
+        //     if (Get_Torques_msg_t msg; try_decode(msg)) {
+        //         torque_target_ = msg.Torque_Target;
+        //         torque_estimate_ = msg.Torque_Estimate;
+        //     }
+        // } break;
             // silently ignore unimplemented command IDs
     }
 }

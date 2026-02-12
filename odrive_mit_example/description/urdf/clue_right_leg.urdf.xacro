@@ -1,0 +1,265 @@
+<?xml version="1.0" ?>
+<robot name="kbotv2_right_leg" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="use_mock_hardware" default="false"/>
+
+  <!-- Base link (attachment point) -->
+  <link name="base_link">
+    <visual name="base_link_visual">
+      <geometry name="base_link_geometry">
+        <sphere radius="0.01"/>
+      </geometry>
+      <material name="base_link_material">
+        <color rgba="1 0 0 1"/>
+      </material>
+      <!-- Base link is the root of the leg, representing the hip attachment point.
+           In robot.urdf, the hip pitch joint origin is xyz="0.037469 0.000007 -0.284479" from Torso.
+           Here, we assume base_link is placed AT the hip pitch joint origin frame for standalone testing.
+      -->
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </visual>
+    <inertial name="base_link_inertial">
+      <mass value="0.001"/>
+      <inertia ixx="0.000001" iyy="0.000001" izz="0.000002" ixy="0" ixz="0" iyz="0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <!-- Right Hip Pitch Joint -->
+  <joint name="dof_right_hip_pitch_04" type="revolute">
+    <origin xyz="0 0 0" rpy="1.570796 0 1.570796"/>
+    <parent link="base_link"/>
+    <child link="KC_D_102R_R_Hip_Yoke_Drive"/>
+    <limit effort="120" velocity="17.488" lower="-2.216568" upper="1.047198"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- Right Hip Yoke Drive -->
+  <link name="KC_D_102R_R_Hip_Yoke_Drive">
+    <visual name="KC_D_102R_R_Hip_Yoke_Drive_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_102R_R_Hip_Yoke_Drive_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_102R_R_Hip_Yoke_Drive.stl"/>
+      </geometry>
+      <material name="KC_D_102R_R_Hip_Yoke_Drive_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision name="KC_D_102R_R_Hip_Yoke_Drive.collision">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_102R_R_Hip_Yoke_Drive_collision_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_102R_R_Hip_Yoke_Drive.collision.stl"/>
+      </geometry>
+    </collision>
+    <inertial name="KC_D_102R_R_Hip_Yoke_Drive_inertial">
+      <mass value="0.530428"/>
+      <inertia ixx="0.000880" iyy="0.001182" izz="0.001271" ixy="-0.000099" ixz="-0.000086" iyz="-0.000156"/>
+      <origin xyz="-0.005644 -0.004227 -0.038197" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <!-- Right Hip Roll Joint -->
+  <joint name="dof_right_hip_roll_03" type="revolute">
+    <origin xyz="-0.028250 -0.030000 -0.071000" rpy="3.141593 -1.570796 0"/>
+    <parent link="KC_D_102R_R_Hip_Yoke_Drive"/>
+    <child link="RS03_4"/>
+    <limit effort="60" velocity="18.849" lower="-2.268928" upper="0.209440"/>
+    <axis xyz="0 0 -1"/>
+  </joint>
+
+  <!-- RS03_4 (Hip Roll Actuator) -->
+  <link name="RS03_4">
+    <visual name="RS03_visual_4">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="RS03_geometry_4">
+        <mesh filename="package://odrive_mit_example/description/meshes/RS03_4.stl"/>
+      </geometry>
+      <material name="RS03_material_4">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision name="RS03.collision_4">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="RS03_collision_geometry_4">
+        <mesh filename="package://odrive_mit_example/description/meshes/RS03_4.collision.stl"/>
+      </geometry>
+    </collision>
+    <inertial name="RS03_inertial_4">
+      <mass value="2.373184"/>
+      <inertia ixx="0.010217" iyy="0.003255" izz="0.010667" ixy="-0.000008" ixz="0.000004" iyz="0.000383"/>
+      <origin xyz="-0.000249 0.058017 0.025580" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <!-- Right Hip Yaw Joint -->
+  <joint name="dof_right_hip_yaw_03" type="revolute">
+    <origin xyz="0 0.143000 0.024250" rpy="-1.570796 0 0"/>
+    <parent link="RS03_4"/>
+    <child link="KC_D_301R_R_Femur_Lower_Drive"/>
+    <limit effort="60" velocity="18.849" lower="-1.570796" upper="1.570796"/>
+    <axis xyz="0 0 -1"/>
+  </joint>
+
+  <!-- Right Femur (Upper Leg) -->
+  <link name="KC_D_301R_R_Femur_Lower_Drive">
+    <visual name="KC_D_301R_R_Femur_Lower_Drive_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_301R_R_Femur_Lower_Drive_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_301R_R_Femur_Lower_Drive.stl"/>
+      </geometry>
+      <material name="KC_D_301R_R_Femur_Lower_Drive_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision name="KC_D_301R_R_Femur_Lower_Drive.collision">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_301R_R_Femur_Lower_Drive_collision_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_301R_R_Femur_Lower_Drive.collision.stl"/>
+      </geometry>
+    </collision>
+    <inertial name="KC_D_301R_R_Femur_Lower_Drive_inertial">
+      <mass value="2.343635"/>
+      <inertia ixx="0.015645" iyy="0.014172" izz="0.004016" ixy="-0.000180" ixz="0.001092" iyz="0.001522"/>
+      <origin xyz="-0.001014 -0.013387 0.171456" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <!-- Right Knee Joint -->
+  <joint name="dof_right_knee_04" type="revolute">
+    <origin xyz="0.020500 -0.021000 0.212000" rpy="1.570796 0 -1.570796"/>
+    <parent link="KC_D_301R_R_Femur_Lower_Drive"/>
+    <child link="KC_D_401R_R_Shin_Drive"/>
+    <limit effort="120" velocity="17.488" lower="-2.705260" upper="0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- Right Shin (Lower Leg) -->
+  <link name="KC_D_401R_R_Shin_Drive">
+    <visual name="KC_D_401R_R_Shin_Drive_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_401R_R_Shin_Drive_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_401R_R_Shin_Drive.stl"/>
+      </geometry>
+      <material name="KC_D_401R_R_Shin_Drive_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision name="KC_D_401R_R_Shin_Drive.collision">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KC_D_401R_R_Shin_Drive_collision_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KC_D_401R_R_Shin_Drive.collision.stl"/>
+      </geometry>
+    </collision>
+    <inertial name="KC_D_401R_R_Shin_Drive_inertial">
+      <mass value="1.670592"/>
+      <inertia ixx="0.014672" iyy="0.002924" izz="0.014592" ixy="0.000103" ixz="0.000025" iyz="-0.000490"/>
+      <origin xyz="-0.024549 0.104152 0.018182" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <!-- Right Ankle Joint -->
+  <joint name="dof_right_ankle_02" type="revolute">
+    <origin xyz="-0.030000 0.290000 0.035100" rpy="0 0 0"/>
+    <parent link="KC_D_401R_R_Shin_Drive"/>
+    <child link="KB_D_501R_R_LEG_FOOT"/>
+    <limit effort="17" velocity="37.699" lower="-0.226893" upper="1.256637"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- Right Foot -->
+  <link name="KB_D_501R_R_LEG_FOOT">
+    <visual name="KB_D_501R_R_LEG_FOOT_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KB_D_501R_R_LEG_FOOT_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KB_D_501R_R_LEG_FOOT.stl"/>
+      </geometry>
+      <material name="KB_D_501R_R_LEG_FOOT_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision name="KB_D_501R_R_LEG_FOOT.collision">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry name="KB_D_501R_R_LEG_FOOT_collision_geometry">
+        <mesh filename="package://odrive_mit_example/description/meshes/KB_D_501R_R_LEG_FOOT.collision.stl"/>
+      </geometry>
+    </collision>
+    <inertial name="KB_D_501R_R_LEG_FOOT_inertial">
+      <mass value="0.483858"/>
+      <inertia ixx="0.000268" iyy="0.001549" izz="0.001458" ixy="0.000080" ixz="0.000022" iyz="-0.000017"/>
+      <origin xyz="-0.014842 0.027139 -0.016105" rpy="0 0 0"/>
+    </inertial>
+  </link>
+
+  <ros2_control name="ODriveBot" type="system">
+    <hardware>
+      <xacro:if value="$(arg use_mock_hardware)">
+        <plugin>mock_components/GenericSystem</plugin>
+        <param name="calculate_dynamics">false</param>
+      </xacro:if>
+      <xacro:unless value="$(arg use_mock_hardware)">
+        <plugin>odrive_ros2_control_plugin/ODriveHardwareInterface</plugin>
+        <param name="can_interface">can0</param>
+      </xacro:unless>
+    </hardware>
+
+    <joint name="dof_right_hip_pitch_04">
+      <param name="node_id">3</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="dof_right_hip_roll_03">
+      <param name="node_id">4</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="dof_right_hip_yaw_03">
+      <param name="node_id">2</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="dof_right_knee_04">
+      <param name="node_id">1</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="dof_right_ankle_02">
+      <param name="node_id">0</param>
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+</robot>

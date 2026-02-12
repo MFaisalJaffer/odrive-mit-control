@@ -18,7 +18,7 @@ def generate_launch_description():
 
     # 1. Get the path to your URDF and Config
     pkg_path = get_package_share_directory('odrive_mit_example')
-    xacro_file = os.path.join(pkg_path, 'description', 'urdf', 'mit_robot.urdf.xacro')
+    xacro_file = os.path.join(pkg_path, 'description', 'urdf', 'clue_right_leg.urdf.xacro')
     
     # 2. Process the Xacro file (convert to XML)
     # We delay processing until runtime to use the LaunchConfiguration, but standard xacro processing
@@ -43,11 +43,18 @@ def generate_launch_description():
         'mit_controllers.yaml'
     )
 
+    # Actuator config
+    actuator_config = os.path.join(
+        get_package_share_directory('odrive_mit_example'),
+        'config',
+        'actuator_config.yaml'
+    )
+
     # 4. Define the Controller Manager Node (The Brain)
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
-        parameters=[robot_description, controller_config],
+        parameters=[robot_description, controller_config, actuator_config],
         output="screen",
     )
 

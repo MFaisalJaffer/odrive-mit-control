@@ -54,6 +54,44 @@ controller_interface::CallbackReturn LegImpedanceController::on_configure(
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  joint_offsets_.resize(joint_names_.size(), 0.0);
+  for (size_t i = 0; i < joint_names_.size(); ++i) {
+      std::string param_name = "actuator_offsets." + joint_names_[i];
+      if (node->has_parameter(param_name)) {
+          joint_offsets_[i] = node->get_parameter(param_name).as_double();
+          RCLCPP_INFO(node->get_logger(), "Loaded offset for joint %s: %f", joint_names_[i].c_str(), joint_offsets_[i]);
+      } else {
+          // Try to declare it if not already declared (though get_parameter usually works if declared in YAML)
+          // To be safe, we declare with default 0.0
+          try {
+              joint_offsets_[i] = node->declare_parameter<double>(param_name, 0.0);
+              // If it was in YAML but not declared, declare_parameter returns the YAML value
+              RCLCPP_INFO(node->get_logger(), "Loaded offset for joint %s: %f (defaulted/declared)", joint_names_[i].c_str(), joint_offsets_[i]);
+          } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException &) {
+              joint_offsets_[i] = node->get_parameter(param_name).as_double();
+              RCLCPP_INFO(node->get_logger(), "Loaded offset for joint %s: %f", joint_names_[i].c_str(), joint_offsets_[i]);
+          }
+      }
+  }
+
+  // Load Actuator Directions
+  joint_directions_.resize(joint_names_.size(), 1.0);
+  for (size_t i = 0; i < joint_names_.size(); ++i) {
+      std::string param_name = "actuator_directions." + joint_names_[i];
+      if (node->has_parameter(param_name)) {
+          joint_directions_[i] = node->get_parameter(param_name).as_double();
+          RCLCPP_INFO(node->get_logger(), "Loaded direction for joint %s: %f", joint_names_[i].c_str(), joint_directions_[i]);
+      } else {
+          try {
+              joint_directions_[i] = node->declare_parameter<double>(param_name, 1.0);
+              RCLCPP_INFO(node->get_logger(), "Loaded direction for joint %s: %f (defaulted/declared)", joint_names_[i].c_str(), joint_directions_[i]);
+          } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException &) {
+              joint_directions_[i] = node->get_parameter(param_name).as_double();
+              RCLCPP_INFO(node->get_logger(), "Loaded direction for joint %s: %f", joint_names_[i].c_str(), joint_directions_[i]);
+          }
+      }
+  }
+
   // Load Joint Limits
   joint_limits_.resize(joint_names_.size());
   for (size_t i = 0; i < joint_names_.size(); ++i) {
@@ -139,8 +177,17 @@ controller_interface::return_type LegImpedanceController::update(
   // Structure: [Hip_Pos, Hip_Vel, Hip_Eff, Hip_Kp, Hip_Kd, Knee_Pos, ...]
   
   int handle_idx = 0;
-  // We assume 3 joints for this example (Hip, Knee, Ankle) to match the message structure
-  for (size_t i = 0; i < joint_names_.size() && i < 3; ++i) { 
+  // Use joint_names_.size() instead of fixed 3
+  for (size_t i = 0; i < joint_names_.size(); ++i) {
+     // Safety check for message size
+     if (i >= latest_cmd_.position_des.size() || 
+         i >= latest_cmd_.velocity_des.size() ||
+         i >= latest_cmd_.feedforward_torque.size() ||
+         i >= latest_cmd_.kp_scale.size() ||
+         i >= latest_cmd_.kd_scale.size()) {
+         break; // Or log error? Breaking to avoid segfault.
+     }
+
      // Enforce Position Limits
      double pos_cmd = latest_cmd_.position_des[i];
      if (joint_limits_[i].has_position_limits) {
@@ -170,6 +217,14 @@ controller_interface::return_type LegImpedanceController::update(
              eff_cmd = -joint_limits_[i].max_effort;
          }
      }
+
+     // Apply Offset and Direction to Position Command
+     // hardware_pos = (urdf_pos + offset) * direction
+     pos_cmd = (pos_cmd + joint_offsets_[i]) * joint_directions_[i];
+     
+     // Apply Direction to Velocity and Effort
+     vel_cmd *= joint_directions_[i];
+     eff_cmd *= joint_directions_[i];
 
      command_interfaces_[handle_idx++].set_value(pos_cmd);
      command_interfaces_[handle_idx++].set_value(vel_cmd);

@@ -23,6 +23,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 install(
+  PROGRAMS
+  scripts/trajectory_generator.py
+  scripts/simple_ik_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY config launch description
   DESTINATION share/${PROJECT_NAME}
 )

@@ -149,6 +149,45 @@ If you find the direct command steps too abrupt (jerky), you can use the include
     ```
     The robot will smoothly interpolate to this position over 2.0 seconds.
 
+## Right Leg Control (Inverse Kinematics)
+
+For the **KBot V2 Right Leg**, we provide a dedicated launch file and an Inverse Kinematics (IK) node that allows you to control the end-effector position in Cartesian space.
+
+### 1. Launch the Leg Control System
+
+This starts the hardware interface, the impedance controller, and the IK node.
+
+```bash
+ros2 launch odrive_mit_example leg_control.launch.py
+```
+
+### 2. Send a Target Position
+
+The IK node subscribes to `/leg_target` (Geometry Point). Coordinates are in meters relative to the hip attachment point (base_link).
+
+```bash
+# Example: Move to 40cm below the hip (x=0, y=0, z=-0.4)
+ros2 topic pub --once /leg_target geometry_msgs/msg/Point "{x: 0.0, y: 0.0, z: -0.4}"
+```
+
+### 3. Actuator Configuration
+
+You can configure actuator offsets and directions in `src/odrive_can/odrive_mit_example/config/actuator_config.yaml`.
+
+-   **Offsets**: Zero-position adjustment in radians. `actuator_pos = joint_pos + offset`.
+-   **Directions**: Motor polarity (1.0 or -1.0). `command_to_hw = (joint_cmd + offset) * direction`.
+
+```yaml
+leg_impedance_controller:
+  ros__parameters:
+    actuator_offsets:
+      dof_right_hip_pitch_04: 0.0
+      # ...
+    actuator_directions:
+      dof_right_hip_pitch_04: 1.0  # Set to -1.0 to invert motor direction
+      # ...
+```
+
 ## Troubleshooting
 
 - **"The passed message type is invalid"**: This means your current terminal doesn't know about the `LegCmd` message. Run `source install/setup.bash` again. Check visibility with `ros2 interface list | grep LegCmd`.

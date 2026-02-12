@@ -1,0 +1,31 @@
+controller_manager:
+  ros__parameters:
+    leg_impedance_controller:
+      type: "my_robot_controllers/LegImpedanceController"
+
+leg_impedance_controller:
+  ros__parameters:
+    joints:
+      - dof_right_hip_pitch_04
+      - dof_right_hip_roll_03
+      - dof_right_hip_yaw_03
+      - dof_right_knee_04
+      - dof_right_ankle_02
+    
+    # Actuator Offsets (radians)
+    # actuator_position = joint_position + offset
+    actuator_offsets:
+      dof_right_hip_pitch_04: 0.0
+      dof_right_hip_roll_03: 0.0
+      dof_right_hip_yaw_03: 0.0
+      dof_right_knee_04: 0.0
+      dof_right_ankle_02: 0.0
+
+    # Actuator Directions (1.0 or -1.0)
+    # actuator_command = (joint_command + offset) * direction
+    actuator_directions:
+      dof_right_hip_pitch_04: 1.0
+      dof_right_hip_roll_03: 1.0
+      dof_right_hip_yaw_03: 1.0
+      dof_right_knee_04: 1.0
+      dof_right_ankle_02: 1.0

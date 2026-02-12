@@ -51,6 +51,12 @@ private:
   // Storage for joint limits
   std::vector<joint_limits::JointLimits> joint_limits_;
   
+  // Storage for actuator offsets
+  std::vector<double> joint_offsets_;
+  
+  // Storage for actuator directions
+  std::vector<double> joint_directions_;
+
   // To store handles for easier access
   // Structure: [joint_index][interface_index]
   // Interfaces order: position, velocity, effort, kp, kd

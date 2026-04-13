@@ -1,0 +1,11 @@
+<library path="leg_impedance_controller">
+  <class name="my_robot_controllers/LegImpedanceController"
+         type="my_robot_controllers::LegImpedanceController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A controller that forwards position, velocity, effort, Kp, and Kd commands to the hardware.
+    </description>
+  </class>
+</library>
+
+

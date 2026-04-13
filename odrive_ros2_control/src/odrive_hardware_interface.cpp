@@ -7,6 +7,27 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "socket_can.hpp"
+#include <algorithm>
+
+// MIT control protocol constants (SteadyWin GIM6010-8 / GIM8108-8)
+// Reference: SteadyWin GIM6010-8 Motor Manual rev2.2, §4.1.2 (Mit_Control, cmd_id 0x008)
+// Command ranges reflect GIM6010-8 physical limits; the CAN protocol supports wider ranges.
+constexpr float MIT_P_MIN = -12.5f, MIT_P_MAX = 12.5f;   // rad
+constexpr float MIT_V_MIN = -45.0f, MIT_V_MAX = 45.0f;   // rad/s
+constexpr float MIT_KP_MIN = 0.0f,  MIT_KP_MAX = 500.0f;
+constexpr float MIT_KD_MIN = 0.0f,  MIT_KD_MAX = 5.0f;
+constexpr float MIT_T_MIN = -18.0f, MIT_T_MAX = 18.0f;   // Nm
+
+// Feedback decode constants match the full protocol range from the DBC / manual
+constexpr float MIT_FB_POS_SCALE = 0.000381f, MIT_FB_POS_OFFSET = -12.5f;
+constexpr float MIT_FB_VEL_SCALE = 0.03175f,  MIT_FB_VEL_OFFSET = -65.0f;
+constexpr float MIT_FB_TRQ_SCALE = 0.02442f,  MIT_FB_TRQ_OFFSET = -50.0f;
+
+// Linear float-to-unsigned encoding used by the MIT CAN protocol (big-endian packing)
+inline uint16_t mit_float_to_uint(float x, float x_min, float x_max, uint8_t bits) {
+    x = std::max(x_min, std::min(x_max, x));
+    return static_cast<uint16_t>((x - x_min) * static_cast<float>((1 << bits) - 1) / (x_max - x_min));
+}
 
 namespace odrive_ros2_control {
 
@@ -57,9 +78,11 @@ struct Axis {
     uint32_t node_id_;
 
     // Commands (ros2_control => ODrives)
-    double pos_setpoint_ = 0.0f; // [rad]
-    double vel_setpoint_ = 0.0f; // [rad/s]
+    double pos_setpoint_ = 0.0f;    // [rad]
+    double vel_setpoint_ = 0.0f;    // [rad/s]
     double torque_setpoint_ = 0.0f; // [Nm]
+    double kp_setpoint_ = 0.0;      // MIT position gain
+    double kd_setpoint_ = 0.0;      // MIT damping gain
 
     // State (ODrives => ros2_control)
     // rclcpp::Time encoder_estimates_timestamp_;
@@ -88,6 +111,7 @@ struct Axis {
     bool pos_input_enabled_ = false;
     bool vel_input_enabled_ = false;
     bool torque_input_enabled_ = false;
+    bool mit_input_enabled_ = false; // true when kp+kd interfaces are claimed
 
     template <typename T>
     void send(const T& msg) const {
@@ -207,6 +231,16 @@ std::vector<hardware_interface::CommandInterface> ODriveHardwareInterface::expor
             hardware_interface::HW_IF_POSITION,
             &axes_[i].pos_setpoint_
         ));
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            info_.joints[i].name,
+            "kp",
+            &axes_[i].kp_setpoint_
+        ));
+        command_interfaces.emplace_back(hardware_interface::CommandInterface(
+            info_.joints[i].name,
+            "kd",
+            &axes_[i].kd_setpoint_
+        ));
     }
 
     return command_interfaces;
@@ -218,10 +252,12 @@ return_type ODriveHardwareInterface::perform_command_mode_switch(
 ) {
     for (size_t i = 0; i < axes_.size(); ++i) {
         Axis& axis = axes_[i];
-        std::array<std::pair<std::string, bool*>, 3> interfaces = {
-            {{info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION, &axis.pos_input_enabled_},
-             {info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY, &axis.vel_input_enabled_},
-             {info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT, &axis.torque_input_enabled_}}};
+        std::array<std::pair<std::string, bool*>, 5> interfaces = {{
+            {info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION, &axis.pos_input_enabled_},
+            {info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY, &axis.vel_input_enabled_},
+            {info_.joints[i].name + "/" + hardware_interface::HW_IF_EFFORT,   &axis.torque_input_enabled_},
+            {info_.joints[i].name + "/kp",                                    &axis.mit_input_enabled_},
+            {info_.joints[i].name + "/kd",                                    &axis.mit_input_enabled_}}};
 
         bool mode_switch = false;
 
@@ -263,6 +299,31 @@ return_type ODriveHardwareInterface::read(const rclcpp::Time& timestamp, const r
 
 return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Duration&) {
     for (auto& axis : axes_) {
+        // MIT mode: pack position, velocity, Kp, Kd, torque_ff into a single 8-byte frame.
+        // cmd_id 0x008, big-endian. All values are on the output-shaft side (rad / rad/s / Nm).
+        if (axis.mit_input_enabled_) {
+            constexpr uint8_t kMITControl = 0x008;
+            uint16_t p  = mit_float_to_uint(static_cast<float>(axis.pos_setpoint_),    MIT_P_MIN,  MIT_P_MAX,  16);
+            uint16_t v  = mit_float_to_uint(static_cast<float>(axis.vel_setpoint_),    MIT_V_MIN,  MIT_V_MAX,  12);
+            uint16_t kp = mit_float_to_uint(static_cast<float>(axis.kp_setpoint_),     MIT_KP_MIN, MIT_KP_MAX, 12);
+            uint16_t kd = mit_float_to_uint(static_cast<float>(axis.kd_setpoint_),     MIT_KD_MIN, MIT_KD_MAX, 12);
+            uint16_t t  = mit_float_to_uint(static_cast<float>(axis.torque_setpoint_), MIT_T_MIN,  MIT_T_MAX,  12);
+
+            struct can_frame frame{};
+            frame.can_id  = axis.node_id_ << 5 | kMITControl;
+            frame.can_dlc = 8;
+            frame.data[0] = (p >> 8) & 0xFF;
+            frame.data[1] =  p & 0xFF;
+            frame.data[2] = (v >> 4) & 0xFF;
+            frame.data[3] = ((v & 0x0F) << 4) | ((kp >> 8) & 0x0F);
+            frame.data[4] =  kp & 0xFF;
+            frame.data[5] = (kd >> 4) & 0xFF;
+            frame.data[6] = ((kd & 0x0F) << 4) | ((t >> 8) & 0x0F);
+            frame.data[7] =  t & 0xFF;
+            axis.can_intf_->send_can_frame(frame);
+            continue;
+        }
+
         // Send the CAN message that fits the set of enabled setpoints
         if (axis.pos_input_enabled_) {
             Set_Input_Pos_msg_t msg;
@@ -304,13 +365,22 @@ void ODriveHardwareInterface::set_axis_command_mode(const Axis& axis) {
         return;
     }
 
-    Set_Controller_Mode_msg_t control_msg;
     Clear_Errors_msg_t clear_error_msg;
-    Set_Axis_State_msg_t state_msg;
-
     clear_error_msg.Identify = 0;
-    control_msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+    Set_Axis_State_msg_t state_msg;
     state_msg.Axis_Requested_State = AXIS_STATE_CLOSED_LOOP_CONTROL;
+
+    if (axis.mit_input_enabled_) {
+        // MIT mode: the firmware handles 0x008 frames without a prior Set_Controller_Mode.
+        // Just clear errors and enter closed-loop; MIT frames drive the motor from write().
+        RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting to MIT control.");
+        axis.send(clear_error_msg);
+        axis.send(state_msg);
+        return;
+    }
+
+    Set_Controller_Mode_msg_t control_msg;
+    control_msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
 
     if (axis.pos_input_enabled_) {
         RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting to position control.");
@@ -357,6 +427,21 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
                 torque_target_ = msg.Torque_Target;
                 torque_estimate_ = msg.Torque_Estimate;
             }
+        } break;
+        case 0x008: {
+            // MIT feedback frame (motor → host), 6 bytes, big-endian.
+            // Byte 0: motor_id; Bytes 1-2: position (16-bit); Bytes 3-4[7:4]: velocity (12-bit);
+            // Bytes 4[3:0]-5: torque (12-bit).
+            if (frame.can_dlc < 6) {
+                RCLCPP_WARN(rclcpp::get_logger("ODriveHardwareInterface"), "MIT feedback frame too short");
+                break;
+            }
+            uint16_t p_raw = (static_cast<uint16_t>(frame.data[1]) << 8) | frame.data[2];
+            uint16_t v_raw = (static_cast<uint16_t>(frame.data[3]) << 4) | ((frame.data[4] >> 4) & 0x0F);
+            uint16_t t_raw = ((static_cast<uint16_t>(frame.data[4]) & 0x0F) << 8) | frame.data[5];
+            pos_estimate_    = static_cast<double>(p_raw) * MIT_FB_POS_SCALE + MIT_FB_POS_OFFSET;
+            vel_estimate_    = static_cast<double>(v_raw) * MIT_FB_VEL_SCALE + MIT_FB_VEL_OFFSET;
+            torque_estimate_ = static_cast<double>(t_raw) * MIT_FB_TRQ_SCALE + MIT_FB_TRQ_OFFSET;
         } break;
             // silently ignore unimplemented command IDs
     }

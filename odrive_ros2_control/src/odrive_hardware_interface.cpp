@@ -68,7 +68,8 @@ private:
 };
 
 struct Axis {
-    Axis(SocketCanIntf* can_intf, uint32_t node_id) : can_intf_(can_intf), node_id_(node_id) {}
+    Axis(SocketCanIntf* can_intf, uint32_t node_id, double gear_ratio)
+        : can_intf_(can_intf), node_id_(node_id), gear_ratio_(gear_ratio) {}
 
     void on_can_msg(const rclcpp::Time& timestamp, const can_frame& frame);
 
@@ -76,6 +77,7 @@ struct Axis {
 
     SocketCanIntf* can_intf_;
     uint32_t node_id_;
+    double gear_ratio_ = 1.0;  // output-to-motor gear ratio (e.g. 8.0 for GIM6010-8)
 
     // Commands (ros2_control => ODrives)
     double pos_setpoint_ = 0.0f;    // [rad]
@@ -139,7 +141,11 @@ CallbackReturn ODriveHardwareInterface::on_init(const hardware_interface::Hardwa
     can_intf_name_ = info_.hardware_parameters["can"];
 
     for (auto& joint : info_.joints) {
-        axes_.emplace_back(&can_intf_, std::stoi(joint.parameters.at("node_id")));
+        double gear_ratio = 1.0;
+        if (joint.parameters.count("gear_ratio")) {
+            gear_ratio = std::stod(joint.parameters.at("gear_ratio"));
+        }
+        axes_.emplace_back(&can_intf_, std::stoi(joint.parameters.at("node_id")), gear_ratio);
     }
 
     return CallbackReturn::SUCCESS;
@@ -303,8 +309,8 @@ return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Du
         // cmd_id 0x008, big-endian. All values are on the output-shaft side (rad / rad/s / Nm).
         if (axis.mit_input_enabled_) {
             constexpr uint8_t kMITControl = 0x008;
-            uint16_t p  = mit_float_to_uint(static_cast<float>(axis.pos_setpoint_),    MIT_P_MIN,  MIT_P_MAX,  16);
-            uint16_t v  = mit_float_to_uint(static_cast<float>(axis.vel_setpoint_),    MIT_V_MIN,  MIT_V_MAX,  12);
+            uint16_t p  = mit_float_to_uint(static_cast<float>(axis.pos_setpoint_), MIT_P_MIN, MIT_P_MAX, 16);
+            uint16_t v  = mit_float_to_uint(static_cast<float>(axis.vel_setpoint_), MIT_V_MIN, MIT_V_MAX, 12);
             uint16_t kp = mit_float_to_uint(static_cast<float>(axis.kp_setpoint_),     MIT_KP_MIN, MIT_KP_MAX, 12);
             uint16_t kd = mit_float_to_uint(static_cast<float>(axis.kd_setpoint_),     MIT_KD_MIN, MIT_KD_MAX, 12);
             uint16_t t  = mit_float_to_uint(static_cast<float>(axis.torque_setpoint_), MIT_T_MIN,  MIT_T_MAX,  12);
@@ -418,8 +424,8 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
     switch (cmd) {
         case Get_Encoder_Estimates_msg_t::cmd_id: {
             if (Get_Encoder_Estimates_msg_t msg; try_decode(msg)) {
-                pos_estimate_ = msg.Pos_Estimate * (2 * M_PI);
-                vel_estimate_ = msg.Vel_Estimate * (2 * M_PI);
+                pos_estimate_ = msg.Pos_Estimate * (2 * M_PI) / gear_ratio_;
+                vel_estimate_ = msg.Vel_Estimate * (2 * M_PI) / gear_ratio_;
             }
         } break;
         case Get_Torques_msg_t::cmd_id: {

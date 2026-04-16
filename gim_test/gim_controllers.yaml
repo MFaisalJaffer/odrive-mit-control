@@ -1,0 +1,18 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    leg_impedance_controller:
+      type: my_robot_controllers/LegImpedanceController
+
+leg_impedance_controller:
+  ros__parameters:
+    joints:
+      - gim_joint
+    cmd_timeout_s: 0.5
+    gim_joint:
+      offset: 0.0
+      direction: 1.0

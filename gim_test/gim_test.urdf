@@ -16,9 +16,10 @@
   <ros2_control name="GimTest" type="system">
     <hardware>
       <plugin>odrive_ros2_control_plugin/ODriveHardwareInterface</plugin>
+      <param name="can">can0</param>
     </hardware>
     <joint name="gim_joint">
-      <param name="node_id">21</param>
+      <param name="node_id">1</param>
       <param name="enable_watchdog">false</param>
       <param name="control_mode">3</param>
       <param name="input_mode">1</param>

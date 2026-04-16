@@ -140,7 +140,11 @@ controller_interface::CallbackReturn LegImpedanceController::on_configure(
   }
 
   // Timeout after which kp/kd are zeroed if no command is received (limp fallback)
-  double timeout_s = node->declare_parameter("cmd_timeout_s", 0.5);
+  double timeout_s = 0.5;
+  if (!node->has_parameter("cmd_timeout_s")) {
+      node->declare_parameter("cmd_timeout_s", 0.5);
+  }
+  timeout_s = node->get_parameter("cmd_timeout_s").as_double();
   cmd_timeout_ = rclcpp::Duration::from_seconds(timeout_s);
 
   // Subscribe to command

@@ -258,26 +258,34 @@ def main():
         print("  Waiting 4 seconds for reboot...")
         time.sleep(4.0)
 
-        # Step 7: Verify — enter closed-loop to get encoder broadcasting, then idle
-        print("\nStep 7: Verifying...")
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
-        time.sleep(1.5)
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
-        time.sleep(0.5)
+        # Step 7: Sweep joint between URDF limits twice to verify calibration
+        print("\nStep 7: Sweeping joint between URDF limits twice to verify calibration...")
 
-        pos2, _ = read_pos(bus, args.node)
-        if pos2 is not None:
-            output_rad2 = pos2 * 2 * math.pi / gear_ratio
-            error_rad = abs(output_rad2 - ref_rad)
-            print(f"  pos_estimate = {pos2:.6f} rotor turns  ({output_rad2:.6f} rad output shaft)")
-            print(f"  Expected:      {ref_rotor:.6f} rotor turns  ({ref_rad:.6f} rad)")
-            if error_rad < 0.05:
-                print(f"  SUCCESS: reads {output_rad2:.4f} rad, expected {ref_rad:.4f} rad (error={error_rad:.4f} rad)")
-            else:
-                print(f"  WARNING: error = {error_rad:.4f} rad — offset may not have applied correctly.")
-                print(f"  Try a full power cycle (motor off/on) if the error persists.")
-        else:
-            print("  No encoder data after reboot.")
+        # Set position control mode (controller_mode=3, input_mode=1)
+        CMD_SET_CTRL_MODE = 0x00B
+        CMD_SET_INPUT_POS = 0x00C
+        send(bus, args.node, CMD_SET_CTRL_MODE, struct.pack('<II', 3, 1))
+        time.sleep(0.1)
+
+        # Enter closed-loop
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
+        time.sleep(1.0)
+
+        # Waypoints: lower → upper → lower → upper, then back to ref
+        lower_rotor = lower * gear_ratio / (2 * math.pi)
+        upper_rotor = upper * gear_ratio / (2 * math.pi)
+        waypoints = [lower, upper, lower, upper, ref_rad]
+        dwell = 3.0  # seconds at each waypoint
+
+        for wp_rad in waypoints:
+            wp_rotor = wp_rad * gear_ratio / (2 * math.pi)
+            send(bus, args.node, CMD_SET_INPUT_POS, struct.pack('<fhh', wp_rotor, 0, 0))
+            print(f"  → commanding {wp_rad:.4f} rad ({wp_rotor:.4f} rotor turns), waiting {dwell}s...")
+            time.sleep(dwell)
+
+        # Go idle
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
+        print("  Sweep complete. Motor now idle.")
 
     finally:
         bus.shutdown()

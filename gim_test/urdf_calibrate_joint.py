@@ -258,30 +258,76 @@ def main():
         print("  Waiting 4 seconds for reboot...")
         time.sleep(4.0)
 
-        # Step 7: Sweep joint between URDF limits twice to verify calibration
+        # Step 7: Sweep joint between URDF limits twice using MIT control to verify calibration
         print("\nStep 7: Sweeping joint between URDF limits twice to verify calibration...")
 
-        # Set position control mode (controller_mode=3, input_mode=1)
-        CMD_SET_CTRL_MODE = 0x00B
-        CMD_SET_INPUT_POS = 0x00C
-        send(bus, args.node, CMD_SET_CTRL_MODE, struct.pack('<II', 3, 1))
-        time.sleep(0.1)
+        CMD_MIT = 0x008
+        MIT_P_MIN, MIT_P_MAX = -12.5, 12.5
+        MIT_V_MIN, MIT_V_MAX = -45.0, 45.0
+        MIT_KP_MIN, MIT_KP_MAX = 0.0, 500.0
+        MIT_KD_MIN, MIT_KD_MAX = 0.0, 5.0
+        MIT_T_MIN, MIT_T_MAX = -18.0, 18.0
+
+        def float_to_uint(x, x_min, x_max, bits):
+            span = x_max - x_min
+            x = max(x_min, min(x_max, x))
+            return int((x - x_min) / span * ((1 << bits) - 1))
+
+        def send_mit(pos_rad, vel=0.0, kp=20.0, kd=2.0, torque=0.0):
+            p  = float_to_uint(pos_rad, MIT_P_MIN, MIT_P_MAX, 16)
+            v  = float_to_uint(vel,     MIT_V_MIN, MIT_V_MAX, 12)
+            kp_ = float_to_uint(kp,    MIT_KP_MIN, MIT_KP_MAX, 12)
+            kd_ = float_to_uint(kd,    MIT_KD_MIN, MIT_KD_MAX, 12)
+            t  = float_to_uint(torque, MIT_T_MIN, MIT_T_MAX, 12)
+            data = bytes([
+                (p >> 8) & 0xFF, p & 0xFF,
+                (v >> 4) & 0xFF,
+                ((v & 0xF) << 4) | ((kp_ >> 8) & 0xF),
+                kp_ & 0xFF,
+                (kd_ >> 4) & 0xFF,
+                ((kd_ & 0xF) << 4) | ((t >> 8) & 0xF),
+                t & 0xFF,
+            ])
+            send(bus, args.node, CMD_MIT, data)
 
         # Enter closed-loop
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
         time.sleep(1.0)
 
         # Waypoints: lower → upper → lower → upper, then back to ref
-        lower_rotor = lower * gear_ratio / (2 * math.pi)
-        upper_rotor = upper * gear_ratio / (2 * math.pi)
+        # MIT position is output shaft radians directly
         waypoints = [lower, upper, lower, upper, ref_rad]
-        dwell = 3.0  # seconds at each waypoint
+        move_time = 2.0   # seconds to travel to each waypoint
+        dwell     = 1.0   # seconds to hold at each waypoint
+        dt        = 0.01  # 100 Hz
+
+        current_pos = ref_rad  # start from reference (where motor is after calibration)
 
         for wp_rad in waypoints:
-            wp_rotor = wp_rad * gear_ratio / (2 * math.pi)
-            send(bus, args.node, CMD_SET_INPUT_POS, struct.pack('<fhh', wp_rotor, 0, 0))
-            print(f"  → commanding {wp_rad:.4f} rad ({wp_rotor:.4f} rotor turns), waiting {dwell}s...")
-            time.sleep(dwell)
+            print(f"  → moving to {wp_rad:.4f} rad over {move_time}s, holding {dwell}s...")
+            start_pos = current_pos
+            move_start = time.time()
+
+            # Ramp to waypoint
+            while True:
+                elapsed = time.time() - move_start
+                if elapsed >= move_time:
+                    break
+                t = elapsed / move_time  # 0.0 → 1.0
+                # Smooth step (ease in/out)
+                t_smooth = t * t * (3.0 - 2.0 * t)
+                cmd = start_pos + (wp_rad - start_pos) * t_smooth
+                send_mit(cmd)
+                time.sleep(dt)
+
+            # Dwell at waypoint
+            send_mit(wp_rad)
+            dwell_deadline = time.time() + dwell
+            while time.time() < dwell_deadline:
+                send_mit(wp_rad)
+                time.sleep(dt)
+
+            current_pos = wp_rad
 
         # Go idle
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))

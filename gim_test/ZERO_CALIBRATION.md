@@ -84,11 +84,12 @@ After motor movement, `pos_estimate` may drift from the true MA732 absolute read
 **Always reboot first** and read `pos_estimate` immediately after entering closed-loop.
 Only a post-reboot reading gives the true absolute encoder position.
 
-### 2. use_index_offset only shifts pos_estimate — not control commands
+### 2. use_index_offset applies to both feedback AND control
 
 In vanilla ODrive, `use_index_offset` applies via `enc_index_cb()` (index pulse interrupt).
-The MA732 is absolute — no index pulse fires — so the offset is applied differently in GIM firmware.
-Result: `/joint_states` reflects the offset, but MIT/position control targets are in raw encoder space.
+The GIM firmware applies it differently for the MA732 absolute encoder. After `odrive_set_offset.py`
+runs and saves the config, both `pos_estimate` (feedback) and position control commands (MIT/pos)
+respect the offset. `position_des: [0.0]` correctly drives to the calibrated zero.
 
 ### 3. SDO writes work silently
 
@@ -165,5 +166,10 @@ To find the correct software offset value after running `odrive_set_offset.py`:
 1. Move motor to desired zero position manually or via position control
 2. Run `odrive_set_offset.py can0 <node_id>` — this sets persistent `index_offset`
 3. After reboot, `/joint_states` will read ~0.0 at the calibrated position
-4. Position control commands still need a matching `offset:` in `gim_controllers.yaml`
-   equal to the raw MA732 absolute reading at the zero position (in output shaft radians)
+4. Both MIT control and position control commands will now target the offset-adjusted frame —
+   `position_des: [0.0]` will go to the calibrated zero
+
+> **Warning**: Do not write arbitrary endpoint IDs via SDO — this can corrupt other firmware
+> settings. If the motor starts behaving unexpectedly after calibration attempts, perform a
+> factory reset via Motor Wizard, then re-run `odrive_set_offset.py` with the correct
+> endpoint IDs (362/363 for firmware v0.5.14).

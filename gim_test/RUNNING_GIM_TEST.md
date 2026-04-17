@@ -98,10 +98,9 @@ ros2 topic pub --once /leg_impedance_controller/command odrive_mit_example/msg/L
 | `kd_scale`      | Velocity damping scale             | 5.0           |
 | `feedforward_torque` | Additional torque feedforward | 0.0           |
 
-> **Note**: Commands target the **raw encoder frame**, not the `index_offset`-adjusted frame.
-> If `/joint_states` reads 2.5 rad at your desired zero, commanding `position_des: [2.5]`
-> will move to that physical position. Use the `offset:` in `gim_controllers.yaml` to
-> remap the command frame. See `ZERO_CALIBRATION.md` for details.
+> **Note**: After running `odrive_set_offset.py`, both feedback (`/joint_states`) and commands
+> respect the calibrated zero — `position_des: [0.0]` will drive to the calibrated zero.
+> See `ZERO_CALIBRATION.md` for the full calibration procedure.
 
 ---
 

@@ -258,8 +258,51 @@ def main():
         print("  Waiting 4 seconds for reboot...")
         time.sleep(4.0)
 
-        # Step 7: Sweep joint between URDF limits twice using MIT control to verify calibration
-        print("\nStep 7: Sweeping joint between URDF limits twice to verify calibration...")
+        # Step 7: Direction check — ask user to push toward lower limit and confirm encoder moves correctly
+        print("\nStep 7: Direction check before sweep.")
+        print(f"  Joint limits:  lower={lower:.4f} rad   upper={upper:.4f} rad")
+        print(f"  >>> Slowly push the joint toward the LOWER limit ({lower:.4f} rad) by hand.")
+        print(f"      Watch the encoder reading below — it should DECREASE toward {lower:.4f}.")
+        print(f"      Press ENTER to start reading (hold joint still first), then push slowly.")
+        input("    (Press ENTER to begin direction check)")
+
+        # Enter closed-loop briefly to get encoder broadcasting
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
+        time.sleep(0.5)
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
+        time.sleep(0.2)
+
+        print("  Reading encoder for 4 seconds — push the joint toward lower limit now...")
+        samples = []
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            r = bus.recv(timeout=0.05)
+            if r and r.arbitration_id == make_can_id(args.node, CMD_ENC_EST):
+                pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
+                output_rad = pos * 2 * math.pi / gear_ratio
+                samples.append(output_rad)
+                print(f"    pos = {output_rad:+.4f} rad", end='\r')
+
+        print()
+        if len(samples) >= 2:
+            delta = samples[-1] - samples[0]
+            if delta < -0.05:
+                print(f"  OK: position moved {delta:+.4f} rad — decreasing toward lower limit. Direction correct.")
+            elif delta > 0.05:
+                print(f"  WARNING: position moved {delta:+.4f} rad — INCREASING when pushed toward lower limit.")
+                print(f"  This suggests the joint direction may be flipped.")
+                print(f"  Check 'direction: -1.0' in gim_controllers.yaml or re-check which end is lower.")
+                ans = input("  Continue with sweep anyway? (y/n): ").strip().lower()
+                if ans != 'y':
+                    print("  Aborting. Motor going idle.")
+                    send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
+                    return
+            else:
+                print(f"  NOTE: minimal movement detected ({delta:+.4f} rad). Make sure to push the joint during the check.")
+
+        print()
+        # Step 8: Sweep joint between URDF limits twice using MIT control to verify calibration
+        print("Step 8: Sweeping joint between URDF limits twice to verify calibration...")
 
         CMD_MIT = 0x008
         MIT_P_MIN, MIT_P_MAX = -12.5, 12.5

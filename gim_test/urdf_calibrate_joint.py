@@ -51,6 +51,11 @@ AXIS_STATE_CLOSED_LOOP = 8
 EP_INDEX_OFFSET     = 362
 EP_USE_INDEX_OFFSET = 363
 
+# Default gear ratio used when not found in the URDF ros2_control section.
+# TODO: add <param name="gear_ratio">8.0</param> to each joint in the robot URDF
+#       under the <ros2_control> section so this fallback is not needed.
+DEFAULT_GEAR_RATIO = 8.0
+
 
 # ── URDF parsing ──────────────────────────────────────────────────────────────
 def parse_urdf_joint(urdf_path, joint_name):
@@ -76,7 +81,7 @@ def parse_urdf_joint(urdf_path, joint_name):
 
     # gear_ratio may appear as a ros2_control joint param or a custom attribute.
     # Check ros2_control section first, then fall back to 1.0.
-    gear_ratio = 1.0
+    gear_ratio = DEFAULT_GEAR_RATIO
     for rc in root.iter('ros2_control'):
         for jnt in rc.iter('joint'):
             if jnt.get('name') == joint_name:
@@ -176,18 +181,21 @@ def main():
     parser.add_argument('--ref',   required=True,
                         help="Current physical position in URDF frame: "
                              "'upper', 'lower', 'zero', or a float in rad")
+    parser.add_argument('--gear-ratio', type=float, default=None,
+                        help='Gear ratio override (default: read from URDF ros2_control section)')
     parser.add_argument('--can',   default='can0', help='CAN interface (default: can0)')
     parser.add_argument('--node',  type=int, default=1, help='CAN node ID (default: 1)')
     args = parser.parse_args()
 
     # ── Parse URDF ────────────────────────────────────────────────────────────
     print(f"Parsing URDF: {args.urdf}")
-    gear_ratio, lower, upper = parse_urdf_joint(args.urdf, args.joint)
+    urdf_gear_ratio, lower, upper = parse_urdf_joint(args.urdf, args.joint)
+    gear_ratio = args.gear_ratio if args.gear_ratio is not None else urdf_gear_ratio
     ref_rad = resolve_reference(args.ref, lower, upper)
 
     print(f"  Joint:      {args.joint}")
     print(f"  Limits:     lower={lower:.6f} rad  upper={upper:.6f} rad")
-    print(f"  Gear ratio: {gear_ratio}")
+    print(f"  Gear ratio: {gear_ratio}{' (from --gear-ratio)' if args.gear_ratio else ' (from URDF)'}")
     print(f"  Reference:  {ref_rad:.6f} rad (--ref '{args.ref}')")
 
     if not (lower - 1e-6 <= ref_rad <= upper + 1e-6):
@@ -262,16 +270,30 @@ def main():
         print("\nStep 7: Direction check before sweep.")
         print(f"  Joint limits:  lower={lower:.4f} rad   upper={upper:.4f} rad")
         print(f"  >>> Slowly push the joint toward the LOWER limit ({lower:.4f} rad) by hand.")
-        print(f"      Watch the encoder reading below — it should DECREASE toward {lower:.4f}.")
-        print(f"      Press ENTER to start reading (hold joint still first), then push slowly.")
-        input("    (Press ENTER to begin direction check)")
+        print(f"      Watch the encoder reading below — it should DECREASE toward {lower:.4f}.\n")
 
-        # Enter closed-loop briefly to get encoder broadcasting
+        # Enter closed-loop briefly to get encoder broadcasting, then idle so joint is free to move
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
         time.sleep(0.5)
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
         time.sleep(0.2)
 
+        # Show live position before user presses ENTER
+        print("  Live position (move the joint to see it update, then press ENTER when ready):")
+        print("  Ctrl+C to abort\n")
+        while True:
+            r = bus.recv(timeout=0.1)
+            if r and r.arbitration_id == make_can_id(args.node, CMD_ENC_EST):
+                pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
+                output_rad = pos * 2 * math.pi / gear_ratio
+                print(f"    pos = {output_rad:+.4f} rad  ({pos:+.6f} rev raw)   (lower={lower:.4f} rad, upper={upper:.4f} rad)   [Press ENTER to begin 4s check]", end='\r')
+            # Non-blocking check for ENTER key
+            import select
+            if select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.readline()
+                break
+
+        print()
         print("  Reading encoder for 4 seconds — push the joint toward lower limit now...")
         samples = []
         deadline = time.time() + 4.0
@@ -281,7 +303,8 @@ def main():
                 pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
                 output_rad = pos * 2 * math.pi / gear_ratio
                 samples.append(output_rad)
-                print(f"    pos = {output_rad:+.4f} rad", end='\r')
+                remaining = max(0.0, deadline - time.time())
+                print(f"    pos = {output_rad:+.4f} rad  ({pos:+.6f} rev raw)   (target lower={lower:.4f} rad)   [{remaining:.1f}s remaining]", end='\r')
 
         print()
         if len(samples) >= 2:
@@ -316,7 +339,7 @@ def main():
             x = max(x_min, min(x_max, x))
             return int((x - x_min) / span * ((1 << bits) - 1))
 
-        def send_mit(pos_rad, vel=0.0, kp=20.0, kd=2.0, torque=0.0):
+        def send_mit(pos_rad, vel=0.0, kp=120.0, kd=2.0, torque=0.0):
             p  = float_to_uint(pos_rad, MIT_P_MIN, MIT_P_MAX, 16)
             v  = float_to_uint(vel,     MIT_V_MIN, MIT_V_MAX, 12)
             kp_ = float_to_uint(kp,    MIT_KP_MIN, MIT_KP_MAX, 12)
@@ -337,14 +360,21 @@ def main():
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
         time.sleep(1.0)
 
+        # Read actual current position to use as interpolation start point
+        actual_pos, _ = read_pos(bus, args.node, timeout=2.0)
+        if actual_pos is not None:
+            current_pos = actual_pos * 2 * math.pi / gear_ratio
+            print(f"  Current position: {current_pos:.4f} rad — interpolating from here.")
+        else:
+            current_pos = ref_rad
+            print(f"  Could not read position, assuming {current_pos:.4f} rad.")
+
         # Waypoints: lower → upper → lower → upper, then back to ref
         # MIT position is output shaft radians directly
         waypoints = [lower, upper, lower, upper, ref_rad]
         move_time = 2.0   # seconds to travel to each waypoint
         dwell     = 1.0   # seconds to hold at each waypoint
         dt        = 0.01  # 100 Hz
-
-        current_pos = ref_rad  # start from reference (where motor is after calibration)
 
         for wp_rad in waypoints:
             print(f"  → moving to {wp_rad:.4f} rad over {move_time}s, holding {dwell}s...")

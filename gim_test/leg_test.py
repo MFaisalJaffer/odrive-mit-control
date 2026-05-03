@@ -85,7 +85,7 @@ def float_to_uint(x, x_min, x_max, bits):
     return int((x - x_min) / (x_max - x_min) * ((1 << bits) - 1))
 
 
-def send_mit(bus, node_id, pos_rad, vel=0.0, kp=20.0, kd=2.0, torque=0.0):
+def send_mit(bus, node_id, pos_rad, vel=0.0, kp=100.0, kd=2.0, torque=0.0):
     p   = float_to_uint(pos_rad, MIT_P_MIN, MIT_P_MAX, 16)
     v   = float_to_uint(vel,     MIT_V_MIN, MIT_V_MAX, 12)
     kp_ = float_to_uint(kp,      MIT_KP_MIN, MIT_KP_MAX, 12)

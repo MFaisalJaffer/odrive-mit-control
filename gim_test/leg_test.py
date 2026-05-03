@@ -32,7 +32,7 @@ GEAR_RATIO = 8.0
 MOVE_TIME  = 3.0   # seconds per move
 DWELL_TIME = 1.0   # seconds to hold at each waypoint
 DT         = 0.01  # 100 Hz loop
-EFFORT     = 150.0 # kp gain applied to all joints during motion
+EFFORT     = 250.0 # kp gain applied to all joints during motion
 
 # Left leg joints: node_id → label
 JOINTS = {
@@ -174,7 +174,18 @@ def smooth_move(bus, start_pos, end_pos, move_time=MOVE_TIME, dwell_time=DWELL_T
             send_mit(bus, nid, end_pos.get(nid, 0.0), kp=kp, kd=kd)
         time.sleep(DT)
 
-    print(f"      reached in {time.time() - move_start:.2f}s")
+    elapsed_total = time.time() - move_start
+    print(f"      reached in {elapsed_total:.2f}s")
+
+    # Read and print actual positions for comparison
+    actual = drain_encoders(bus, duration=0.2)
+    print(f"      {'joint':<12}  {'target':>10}  {'actual':>10}  {'error':>10}")
+    print(f"      {'-'*48}")
+    for nid in NODE_IDS:
+        target = end_pos.get(nid, 0.0)
+        act    = actual.get(nid, float('nan'))
+        err    = act - target
+        print(f"      {JOINTS[nid]:<12}  {target:>+10.4f}  {act:>+10.4f}  {err:>+10.4f} rad")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ GEAR_RATIO = 8.0
 MOVE_TIME  = 3.0   # seconds per move
 DWELL_TIME = 1.0   # seconds to hold at each waypoint
 DT         = 0.01  # 100 Hz loop
+EFFORT     = 150.0 # kp gain applied to all joints during motion
 
 # Left leg joints: node_id → label
 JOINTS = {
@@ -85,7 +86,7 @@ def float_to_uint(x, x_min, x_max, bits):
     return int((x - x_min) / (x_max - x_min) * ((1 << bits) - 1))
 
 
-def send_mit(bus, node_id, pos_rad, vel=0.0, kp=150.0, kd=2.0, torque=0.0):
+def send_mit(bus, node_id, pos_rad, vel=0.0, kp=EFFORT, kd=2.0, torque=0.0):
     p   = float_to_uint(pos_rad, MIT_P_MIN, MIT_P_MAX, 16)
     v   = float_to_uint(vel,     MIT_V_MIN, MIT_V_MAX, 12)
     kp_ = float_to_uint(kp,      MIT_KP_MIN, MIT_KP_MAX, 12)
@@ -140,7 +141,7 @@ def smoothstep(t):
 
 
 def smooth_move(bus, start_pos, end_pos, move_time=MOVE_TIME, dwell_time=DWELL_TIME,
-                kp=150.0, kd=2.0, label=''):
+                kp=EFFORT, kd=2.0, label=''):
     """
     Interpolate all joints from start_pos to end_pos over move_time seconds,
     then dwell at end_pos for dwell_time seconds.

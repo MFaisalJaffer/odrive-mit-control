@@ -140,7 +140,7 @@ def smoothstep(t):
 
 
 def smooth_move(bus, start_pos, end_pos, move_time=MOVE_TIME, dwell_time=DWELL_TIME,
-                kp=20.0, kd=2.0, label=''):
+                kp=150.0, kd=2.0, label=''):
     """
     Interpolate all joints from start_pos to end_pos over move_time seconds,
     then dwell at end_pos for dwell_time seconds.

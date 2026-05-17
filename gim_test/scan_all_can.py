@@ -14,12 +14,14 @@ Usage:
 """
 
 import can
+import math
 import struct
 import sys
 import time
 
 DURATION     = float(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].replace('.','').isdigit() else 5.0
 IFACES       = sys.argv[2:] if len(sys.argv) > 2 else ['can0', 'can1']
+GEAR_RATIO   = 8.0
 
 CMD_HEARTBEAT = 0x001
 CMD_ENC_EST   = 0x009
@@ -111,7 +113,7 @@ for iface in IFACES:
             info      = nodes[node_id]
             state_str = AXIS_STATES.get(info['state'], f"UNKNOWN({info['state']})")
             error_str = f"0x{info['error']:08X}" if info['error'] else "none"
-            pos_str   = f"{enc_pos[node_id]:+.4f} rev" if node_id in enc_pos else "no encoder broadcast"
+            pos_str   = f"{enc_pos[node_id] * 2 * math.pi / GEAR_RATIO:+.4f} rad" if node_id in enc_pos else "no encoder broadcast"
             print(f"  │  node {node_id:>2}  state={state_str:<22} error={error_str}  pos={pos_str}  hb={info['count']}/{DURATION:.0f}s")
             total += 1
     print(f"  └{'─' * 57}")

@@ -119,20 +119,28 @@ def send(bus, node_id, cmd, data):
     ))
 
 
-def read_pos(bus, node_id, timeout=2.0):
-    """Read encoder pos_estimate, skipping zero frames (motor broadcasts zeros when idle)."""
+def read_pos(bus, node_id, timeout=2.0, samples=10):
+    """Read encoder pos_estimate from the broadcast.
+
+    Returns the last value seen after collecting `samples` frames (or until
+    timeout). Do NOT skip near-zero values — at certain physical positions
+    the raw absolute reading is genuinely near zero, and skipping those
+    would force a closed-loop entry that spins the rotor and poisons the
+    calibration baseline."""
     enc_id = make_can_id(node_id, CMD_ENC_EST)
     deadline = time.time() + timeout
-    last = None
+    last = (None, None)
+    count = 0
     while time.time() < deadline:
         r = bus.recv(timeout=0.05)
         if r and r.arbitration_id == enc_id:
             pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
             vel = struct.unpack_from('<f', bytes(r.data), 4)[0]
             last = (pos, vel)
-            if abs(pos) > 1e-4:
-                return pos, vel
-    return last if last else (None, None)
+            count += 1
+            if count >= samples:
+                return last
+    return last
 
 
 def wait_txsdo(bus, node_id, ep, timeout=0.5):
@@ -222,16 +230,14 @@ def main():
         print("  Rebooting... waiting 4 seconds...")
         time.sleep(4.0)
 
-        # Step 2: Enter closed-loop then idle to settle encoder
-        print("\nStep 2: Entering closed-loop then idle to settle encoder...")
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
-        time.sleep(1.5)
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
-        time.sleep(0.5)
+        # Step 2: skipped — entering CLOSED_LOOP here used to spin the rotor
+        # several turns (lockin / pre-arm settling), which poisoned the raw
+        # reading used for offset calibration. The motor broadcasts pos_estimate
+        # in IDLE just fine; read directly from the broadcast instead.
 
-        # Step 3: Read raw absolute pos_estimate
-        print("\nStep 3: Reading raw absolute encoder position...")
-        raw_pos, _ = read_pos(bus, args.node)
+        # Step 3: Read raw absolute pos_estimate from the idle broadcast
+        print("\nStep 3: Reading raw absolute encoder position from broadcast...")
+        raw_pos, _ = read_pos(bus, args.node, timeout=3.0, samples=20)
         if raw_pos is None:
             print("ERROR: no encoder data received. Is the motor powered on?")
             sys.exit(1)

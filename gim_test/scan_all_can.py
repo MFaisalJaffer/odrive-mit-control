@@ -57,10 +57,12 @@ def send(bus, node_id, cmd, data):
     bus.send(can.Message(arbitration_id=can_id(node_id, cmd), data=data, is_extended_id=False))
 
 def fetch_true_position(bus, node_id):
-    """Enter closed-loop, read pos_estimate, return to IDLE."""
-    send(bus, node_id, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
-    time.sleep(0.5)
+    """Listen for the encoder broadcast in IDLE — do NOT enter closed-loop.
 
+    Entering CLOSED_LOOP triggers the firmware lockin, which spins the rotor
+    ~2.68 turns and offsets pos_estimate by ~2.11 rad output (gear 8). The
+    encoder broadcast is emitted in IDLE on this firmware, so we can read
+    pos_estimate passively without disturbing the actuator."""
     pos = None
     enc_id = can_id(node_id, CMD_ENC_EST)
     deadline = time.time() + 0.5
@@ -69,8 +71,6 @@ def fetch_true_position(bus, node_id):
         if r and r.arbitration_id == enc_id and len(r.data) >= 8:
             pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
             break
-
-    send(bus, node_id, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
     return pos
 
 def scan(iface, duration):

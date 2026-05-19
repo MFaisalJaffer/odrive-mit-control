@@ -44,7 +44,8 @@ CMD_CLEAR_ERR      = 0x018
 CMD_SET_LIN_COUNT  = 0x019  # Set_Linear_Count: sets encoder position to given int32
 CMD_RXSDO          = 0x004
 CMD_TXSDO          = 0x005
-CMD_SAVE_CFG       = 0x01F
+CMD_SAVE_CFG       = 0x01F  # unused — use EP_SAVE_CONFIG via SDO instead
+EP_SAVE_CONFIG     = 478
 
 AXIS_STATE_IDLE        = 1
 AXIS_STATE_CLOSED_LOOP = 8
@@ -205,9 +206,10 @@ def main():
         time.sleep(0.1)
         print("   Sent.")
 
-        # Step 9: Save configuration
-        print("9. Saving configuration (cmd_id=0x01F)...")
-        send(bus, CMD_SAVE_CFG, bytes(8))
+        # Step 9: Save configuration via SDO endpoint 478
+        print("9. Saving configuration (ep 478)...")
+        save_payload = struct.pack('<BHB4x', 1, EP_SAVE_CONFIG, 0)
+        send(bus, CMD_RXSDO, save_payload)
         time.sleep(1.5)  # motor reboots after save
 
         print("\nDone.")

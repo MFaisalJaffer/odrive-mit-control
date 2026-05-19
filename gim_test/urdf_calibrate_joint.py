@@ -50,6 +50,7 @@ AXIS_STATE_CLOSED_LOOP = 8
 # GIM firmware v0.5.14 endpoints
 EP_INDEX_OFFSET     = 362
 EP_USE_INDEX_OFFSET = 363
+EP_SAVE_CONFIG      = 478  # save_configuration function endpoint
 
 # Default gear ratio used when not found in the URDF ros2_control section.
 # TODO: add <param name="gear_ratio">8.0</param> to each joint in the robot URDF
@@ -180,6 +181,25 @@ def sdo_write_bool(bus, node_id, ep, value):
         print("    No TxSdo reply (expected for GIM firmware)")
 
 
+def sdo_save_config(bus, node_id):
+    """Call save_configuration via SDO endpoint 478 and check the success output (ep 479)."""
+    payload = struct.pack('<BHB4x', 1, EP_SAVE_CONFIG, 0)
+    send(bus, node_id, CMD_RXSDO, payload)
+    txsdo_id_5 = make_can_id(node_id, CMD_TXSDO)
+    txsdo_id_7 = (node_id << 7) | CMD_TXSDO
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        r = bus.recv(timeout=0.1)
+        if r and r.arbitration_id in (txsdo_id_5, txsdo_id_7) and len(r.data) >= 5:
+            ep_echo = struct.unpack_from('<H', bytes(r.data), 1)[0]
+            if ep_echo == 479:  # success output endpoint
+                success = bool(r.data[4])
+                print(f"    save_configuration: {'OK' if success else 'FAILED'}")
+                return success
+    print("    save_configuration: no TxSdo reply (GIM firmware may not ack)")
+    return False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
@@ -224,7 +244,7 @@ def main():
         print("Step 1: Clearing offset and rebooting to get true absolute encoder reading...")
         sdo_write_float(bus, args.node, EP_INDEX_OFFSET, 0.0)
         sdo_write_bool(bus, args.node, EP_USE_INDEX_OFFSET, False)
-        send(bus, args.node, CMD_SAVE_CFG, bytes(8))
+        sdo_save_config(bus, args.node)
         time.sleep(0.5)
         send(bus, args.node, CMD_REBOOT, bytes([0]))
         print("  Rebooting... waiting 4 seconds...")
@@ -265,7 +285,7 @@ def main():
 
         # Step 6: Save and reboot
         print("\nStep 6: Saving configuration...")
-        send(bus, args.node, CMD_SAVE_CFG, bytes(8))
+        sdo_save_config(bus, args.node)
         time.sleep(0.5)
         print("Rebooting to apply offset...")
         send(bus, args.node, CMD_REBOOT, bytes([0]))

@@ -27,7 +27,7 @@ import sys
 import time
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CAN_IFACE  = sys.argv[1] if len(sys.argv) > 1 else 'can1'
+CAN_IFACE  = sys.argv[1] if len(sys.argv) > 1 else 'can0'
 GEAR_RATIO = 8.0
 MOVE_TIME  = 3.0   # seconds per move
 DWELL_TIME = 1.0   # seconds to hold at each waypoint
@@ -36,11 +36,11 @@ EFFORT     = 250.0 # kp gain applied to all joints during motion
 
 # Left leg joints: node_id → label
 JOINTS = {
-    13: 'hip_pitch',
-    14: 'hip_roll',
-    15: 'hip_yaw',
-    16: 'knee',
-    17: 'ankle',
+    3: 'hip_pitch',
+    4: 'hip_roll',
+    5: 'hip_yaw',
+    6: 'knee',
+    7: 'ankle',
 }
 NODE_IDS = sorted(JOINTS.keys())
 
@@ -48,7 +48,6 @@ NODE_IDS = sorted(JOINTS.keys())
 CMD_ENC_EST   = 0x009
 CMD_SET_STATE = 0x007
 CMD_MIT       = 0x008
-CMD_REBOOT    = 0x016
 
 AXIS_STATE_IDLE        = 1
 AXIS_STATE_CLOSED_LOOP = 8
@@ -202,18 +201,14 @@ def main():
     bus = can.interface.Bus(channel=CAN_IFACE, interface='socketcan')
 
     try:
-        # ── Step 0: Reboot all joints for fresh absolute encoder readings ─────
-        print("Step 0: Rebooting all joints...")
-        for nid in NODE_IDS:
-            send_raw(bus, nid, CMD_REBOOT, bytes([0]))
-        print("  Waiting 5 seconds for reboot...")
-        time.sleep(5.0)
-        print("  Reboot complete.\n")
-
-        # ── Step 1: IDLE all joints so user can pose the leg ─────────────────
-        print("Step 1: Setting all joints to IDLE — leg is now free to move.")
-        set_all_state(bus, AXIS_STATE_IDLE)
+        # ── Step 1: Read initial positions then IDLE so user can pose the leg ──
+        print("Step 1: Reading initial positions (closed-loop flash)...")
+        set_all_state(bus, AXIS_STATE_CLOSED_LOOP)
         time.sleep(0.5)
+        drain_encoders(bus, duration=0.3)  # warm up encoder frames
+        set_all_state(bus, AXIS_STATE_IDLE)
+        time.sleep(0.3)
+        print("  Leg is now free to move.")
 
         print()
         print("  Pose the leg to the DESIRED TARGET position.")

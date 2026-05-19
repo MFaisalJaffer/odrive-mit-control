@@ -298,11 +298,8 @@ def main():
         print(f"  >>> Slowly push the joint toward the LOWER limit ({lower:.4f} rad) by hand.")
         print(f"      Watch the encoder reading below — it should DECREASE toward {lower:.4f}.\n")
 
-        # Enter closed-loop briefly to get encoder broadcasting, then idle so joint is free to move
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
-        time.sleep(0.5)
-        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
-        time.sleep(0.2)
+        # Read directly from the IDLE broadcast — entering CLOSED_LOOP here
+        # would spin the rotor ~2.68 turns (lockin) and poison the live display.
 
         # Show live position before user presses ENTER
         print("  Live position (move the joint to see it update, then press ENTER when ready):")

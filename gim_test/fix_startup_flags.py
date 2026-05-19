@@ -12,6 +12,9 @@ Endpoints (fw 3.11.1 / 0.6.0):
   146 axis0.config.startup_encoder_offset_calibration   -> False
   147 axis0.config.startup_closed_loop_control          -> False
   370 axis0.encoder.config.pre_calibrated               -> True
+  172 axis0.config.general_lockin.ramp_distance         -> 0.0
+       (eliminates the ~2.68 rotor-turn spin on every IDLE→CLOSED_LOOP
+        transition that was offsetting pos_estimate by ~2.11 rad output)
 
 Usage:
   python3 fix_startup_flags.py --can can0 --node 1
@@ -44,6 +47,11 @@ def sdo_write_bool(bus, node_id, ep, value):
     send(bus, node_id, CMD_RXSDO, payload)
 
 
+def sdo_write_float(bus, node_id, ep, value):
+    payload = struct.pack('<BHBf', 1, ep, 0, value)
+    send(bus, node_id, CMD_RXSDO, payload)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -55,16 +63,24 @@ def main():
     print(f"Opened {args.can}, node_id={args.node}")
 
     try:
-        writes = [
+        bool_writes = [
             (144, False, 'startup_motor_calibration'),
             (145, False, 'startup_encoder_index_search'),
             (146, False, 'startup_encoder_offset_calibration'),
             (147, False, 'startup_closed_loop_control'),
             (370, True,  'encoder.config.pre_calibrated'),
         ]
-        for ep, val, name in writes:
+        for ep, val, name in bool_writes:
             print(f"  ep {ep:3d}  {name} = {val}")
             sdo_write_bool(bus, args.node, ep, val)
+            time.sleep(0.05)
+
+        float_writes = [
+            (172, 0.0, 'general_lockin.ramp_distance'),
+        ]
+        for ep, val, name in float_writes:
+            print(f"  ep {ep:3d}  {name} = {val}")
+            sdo_write_float(bus, args.node, ep, val)
             time.sleep(0.05)
 
         print("\nSaving configuration...")

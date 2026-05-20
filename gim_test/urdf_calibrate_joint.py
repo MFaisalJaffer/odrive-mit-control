@@ -120,28 +120,20 @@ def send(bus, node_id, cmd, data):
     ))
 
 
-def read_pos(bus, node_id, timeout=2.0, samples=10):
-    """Read encoder pos_estimate from the broadcast.
-
-    Returns the last value seen after collecting `samples` frames (or until
-    timeout). Do NOT skip near-zero values — at certain physical positions
-    the raw absolute reading is genuinely near zero, and skipping those
-    would force a closed-loop entry that spins the rotor and poisons the
-    calibration baseline."""
+def read_pos(bus, node_id, timeout=2.0):
+    """Read encoder pos_estimate, skipping zero frames (motor broadcasts zeros when idle)."""
     enc_id = make_can_id(node_id, CMD_ENC_EST)
     deadline = time.time() + timeout
-    last = (None, None)
-    count = 0
+    last = None
     while time.time() < deadline:
         r = bus.recv(timeout=0.05)
         if r and r.arbitration_id == enc_id:
             pos = struct.unpack_from('<f', bytes(r.data), 0)[0]
             vel = struct.unpack_from('<f', bytes(r.data), 4)[0]
             last = (pos, vel)
-            count += 1
-            if count >= samples:
-                return last
-    return last
+            if abs(pos) > 1e-4:
+                return pos, vel
+    return last if last else (None, None)
 
 
 def wait_txsdo(bus, node_id, ep, timeout=0.5):
@@ -250,23 +242,16 @@ def main():
         print("  Rebooting... waiting 4 seconds...")
         time.sleep(4.0)
 
-        # Step 2: Enter CLOSED_LOOP so the firmware actually samples the
-        # encoder. On this firmware pos_estimate is NOT updated in IDLE —
-        # the broadcast just repeats a stale RAM value. CLOSED_LOOP is the
-        # only way to read the real absolute reading.
-        # Prerequisite: fix_startup_flags.py must have zeroed the general_lockin
-        # fields, otherwise this transition will physically spin the rotor.
-        print("\nStep 2: Entering CLOSED_LOOP so the encoder is actually sampled...")
+        # Step 2: Enter closed-loop then idle to settle encoder
+        print("\nStep 2: Entering closed-loop then idle to settle encoder...")
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
-        time.sleep(1.0)
-
-        # Step 3: Read raw absolute pos_estimate from the closed-loop broadcast
-        print("\nStep 3: Reading raw absolute encoder position from closed-loop broadcast...")
-        raw_pos, _ = read_pos(bus, args.node, timeout=3.0, samples=20)
-
-        # Go back to IDLE before writing config
+        time.sleep(1.5)
         send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
-        time.sleep(0.3)
+        time.sleep(0.5)
+
+        # Step 3: Read raw absolute pos_estimate
+        print("\nStep 3: Reading raw absolute encoder position...")
+        raw_pos, _ = read_pos(bus, args.node)
         if raw_pos is None:
             print("ERROR: no encoder data received. Is the motor powered on?")
             sys.exit(1)
@@ -307,8 +292,11 @@ def main():
         print(f"  >>> Slowly push the joint toward the LOWER limit ({lower:.4f} rad) by hand.")
         print(f"      Watch the encoder reading below — it should DECREASE toward {lower:.4f}.\n")
 
-        # Read directly from the IDLE broadcast — entering CLOSED_LOOP here
-        # would spin the rotor ~2.68 turns (lockin) and poison the live display.
+        # Enter closed-loop briefly to get encoder broadcasting, then idle so joint is free to move
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
+        time.sleep(0.5)
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
+        time.sleep(0.2)
 
         # Show live position before user presses ENTER
         print("  Live position (move the joint to see it update, then press ENTER when ready):")

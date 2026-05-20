@@ -32,7 +32,7 @@ GEAR_RATIO = 8.0
 MOVE_TIME  = 3.0   # seconds per move
 DWELL_TIME = 1.0   # seconds to hold at each waypoint
 DT         = 0.01  # 100 Hz loop
-EFFORT     = 250.0 # kp gain applied to all joints during motion
+EFFORT     = 50.0 # kp gain applied to all joints during motion
 
 # Left leg joints: node_id → label
 JOINTS = {

@@ -232,8 +232,25 @@ def main():
     print(f"Opened {args.can}, node_id={args.node}\n")
 
     try:
-        # Step 1: Clear existing offset and reboot for fresh MA732 absolute reading
-        print("Step 1: Clearing offset and rebooting to get true absolute encoder reading...")
+        # Step 1: Apply startup flags + zero lockin + clear offset, then reboot.
+        # The startup flags and lockin zeros must be in place BEFORE Step 2
+        # enters CLOSED_LOOP, otherwise the firmware will physically spin the
+        # rotor by ~2.68 turns and poison the encoder reading.
+        print("Step 1: Configuring startup flags, zeroing lockin, clearing offset, rebooting...")
+        # Disable startup auto-calibration sequences
+        sdo_write_bool(bus, args.node, 144, False)   # startup_motor_calibration
+        sdo_write_bool(bus, args.node, 145, False)   # startup_encoder_index_search
+        sdo_write_bool(bus, args.node, 146, False)   # startup_encoder_offset_calibration
+        sdo_write_bool(bus, args.node, 147, False)   # startup_closed_loop_control
+        # Mark encoder pre-calibrated so saved offset is honoured on boot
+        sdo_write_bool(bus, args.node, 370, True)    # encoder.config.pre_calibrated
+        # Zero general_lockin to prevent rotor spin on IDLE -> CLOSED_LOOP
+        sdo_write_float(bus, args.node, 170, 0.0)    # general_lockin.current
+        sdo_write_float(bus, args.node, 171, 0.0)    # general_lockin.ramp_time
+        sdo_write_float(bus, args.node, 172, 0.0)    # general_lockin.ramp_distance
+        sdo_write_float(bus, args.node, 173, 0.0)    # general_lockin.accel
+        sdo_write_float(bus, args.node, 174, 0.0)    # general_lockin.vel
+        # Clear index_offset for a fresh calibration
         sdo_write_float(bus, args.node, EP_INDEX_OFFSET, 0.0)
         sdo_write_bool(bus, args.node, EP_USE_INDEX_OFFSET, False)
         sdo_save_config(bus, args.node)

@@ -97,20 +97,23 @@ def main():
 
         for dt, pos in first_samples:
             rad = pos * 2 * math.pi / GEAR_RATIO
-            delta = (rad - idle_rad) if idle_rad is not None else float('nan')
-            print(f"  t={dt*1000:6.0f}ms   pos={pos:+.6f} rev  ({rad:+.4f} rad)   "
-                  f"delta-from-idle={delta:+.4f} rad")
+            print(f"  t={dt*1000:6.0f}ms   pos={pos:+.6f} rev  ({rad:+.4f} rad)")
 
-        if idle_rad is not None and first_samples:
-            final_rad = first_samples[-1][1] * 2 * math.pi / GEAR_RATIO
-            jump = abs(final_rad - idle_rad)
+        # The IDLE value is stale software state on this firmware (it equals
+        # -index_offset, not a real encoder reading), so comparing first
+        # closed-loop sample to IDLE is meaningless. Instead, detect lockin
+        # by motion ACROSS the first closed-loop samples — a real lockin
+        # spin would change position over its ramp window.
+        if len(first_samples) >= 2:
+            first_rad = first_samples[0][1] * 2 * math.pi / GEAR_RATIO
+            last_rad  = first_samples[-1][1] * 2 * math.pi / GEAR_RATIO
+            window_motion = abs(last_rad - first_rad)
             print()
-            if jump > 1.0:
-                print(f"  >>> LOCKIN STILL ACTIVE — position jumped {jump:.3f} rad on entry")
-            elif jump > 0.05:
-                print(f"  >>> Small offset of {jump:.3f} rad — could be lockin remnant or settle")
+            if window_motion > 0.1:
+                print(f"  >>> LOCKIN STILL ACTIVE — rotor moved {window_motion:.3f} rad during sample window")
             else:
-                print(f"  >>> No significant jump ({jump:.3f} rad) — lockin appears dead")
+                print(f"  >>> Position stable across samples (motion {window_motion:.4f} rad) — lockin dead")
+                print(f"  >>> Closed-loop reading at current physical position: {last_rad:+.4f} rad output")
 
         print()
         print("Now move the joint by hand. Position should track:")

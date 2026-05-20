@@ -44,21 +44,21 @@ LEGS = {
     'right': {
         'can': 'can0',
         'joints': [
-            (3, 'hip_pitch', 'dof_right_hip_pitch_01'),
-            (4, 'hip_roll',  'dof_right_hip_roll_02'),
+            (3, 'hip_pitch', 'dof_right_hip_pitch_04'),
+            (4, 'hip_roll',  'dof_right_hip_roll_03'),
             (5, 'hip_yaw',   'dof_right_hip_yaw_03'),
             (6, 'knee',      'dof_right_knee_04'),
-            (7, 'ankle',     'dof_right_ankle_05'),
+            (7, 'ankle',     'dof_right_ankle_02'),
         ],
     },
     'left': {
         'can': 'can1',
         'joints': [
-            (13, 'hip_pitch', 'dof_left_hip_pitch_01'),
-            (14, 'hip_roll',  'dof_left_hip_roll_02'),
+            (13, 'hip_pitch', 'dof_left_hip_pitch_04'),
+            (14, 'hip_roll',  'dof_left_hip_roll_03'),
             (15, 'hip_yaw',   'dof_left_hip_yaw_03'),
             (16, 'knee',      'dof_left_knee_04'),
-            (17, 'ankle',     'dof_left_ankle_05'),
+            (17, 'ankle',     'dof_left_ankle_02'),
         ],
     },
 }

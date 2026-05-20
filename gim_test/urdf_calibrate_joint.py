@@ -250,14 +250,23 @@ def main():
         print("  Rebooting... waiting 4 seconds...")
         time.sleep(4.0)
 
-        # Step 2: skipped — entering CLOSED_LOOP here used to spin the rotor
-        # several turns (lockin / pre-arm settling), which poisoned the raw
-        # reading used for offset calibration. The motor broadcasts pos_estimate
-        # in IDLE just fine; read directly from the broadcast instead.
+        # Step 2: Enter CLOSED_LOOP so the firmware actually samples the
+        # encoder. On this firmware pos_estimate is NOT updated in IDLE —
+        # the broadcast just repeats a stale RAM value. CLOSED_LOOP is the
+        # only way to read the real absolute reading.
+        # Prerequisite: fix_startup_flags.py must have zeroed the general_lockin
+        # fields, otherwise this transition will physically spin the rotor.
+        print("\nStep 2: Entering CLOSED_LOOP so the encoder is actually sampled...")
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_CLOSED_LOOP))
+        time.sleep(1.0)
 
-        # Step 3: Read raw absolute pos_estimate from the idle broadcast
-        print("\nStep 3: Reading raw absolute encoder position from broadcast...")
+        # Step 3: Read raw absolute pos_estimate from the closed-loop broadcast
+        print("\nStep 3: Reading raw absolute encoder position from closed-loop broadcast...")
         raw_pos, _ = read_pos(bus, args.node, timeout=3.0, samples=20)
+
+        # Go back to IDLE before writing config
+        send(bus, args.node, CMD_SET_STATE, struct.pack('<I', AXIS_STATE_IDLE))
+        time.sleep(0.3)
         if raw_pos is None:
             print("ERROR: no encoder data received. Is the motor powered on?")
             sys.exit(1)

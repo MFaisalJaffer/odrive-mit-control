@@ -75,8 +75,16 @@ def main():
             sdo_write_bool(bus, args.node, ep, val)
             time.sleep(0.05)
 
+        # Zero ALL general_lockin fields. ramp_distance=0 alone was
+        # observed to not suppress lockin; zeroing current as well means
+        # the motor cannot apply torque to spin the rotor regardless of
+        # what other lockin logic runs.
         float_writes = [
+            (170, 0.0, 'general_lockin.current'),
+            (171, 0.0, 'general_lockin.ramp_time'),
             (172, 0.0, 'general_lockin.ramp_distance'),
+            (173, 0.0, 'general_lockin.accel'),
+            (174, 0.0, 'general_lockin.vel'),
         ]
         for ep, val, name in float_writes:
             print(f"  ep {ep:3d}  {name} = {val}")

@@ -40,20 +40,29 @@ Tuning tips:
 
 import argparse
 import can
+import csv
 import json
 import math
+import os
 import select
 import struct
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 
 # ── Motion params ─────────────────────────────────────────────────────────────
 GEAR_RATIO     = 8.0
 MOVE_TIME      = 3.0     # seconds per move
 DWELL_TIME     = 1.0     # seconds to hold at each waypoint
 DT             = 0.01    # 100 Hz loop
-DEFAULT_KP     = 50.0    # Default kp — start low, tune up
+DEFAULT_KP     = 100.0   # Default kp (used when sweep is disabled)
+
+# kp sweep: same motion sequence is executed once per value, for sim comparison
+KP_SWEEP       = [50.0, 100.0, 150.0]
+# Gains used for "reset to hanging" between sweeps — kept low/safe
+RESET_KP       = 50.0
+RESET_KD       = 2.0
 DEFAULT_KD     = 2.0     # Default kd
 PASSIVE_KP     = 0.0     # kp for pose-capture passive mode
 PASSIVE_KD     = 0.0     # kd for pose-capture passive mode
@@ -92,12 +101,17 @@ CMD_MIT       = 0x008
 AXIS_STATE_IDLE        = 1
 AXIS_STATE_CLOSED_LOOP = 8
 
-# MIT bitfield ranges (manual section 4.1.3)
+# MIT command bitfield ranges (manual section 4.1.3)
 MIT_P_MIN,  MIT_P_MAX  = -12.5, 12.5    # rad (output shaft)
 MIT_V_MIN,  MIT_V_MAX  = -45.0, 45.0    # rad/s
 MIT_KP_MIN, MIT_KP_MAX =   0.0, 500.0
 MIT_KD_MIN, MIT_KD_MAX =   0.0, 5.0
 MIT_T_MIN,  MIT_T_MAX  = -18.0, 18.0    # Nm
+
+# MIT feedback decoding ranges (differ from command ranges)
+FB_P_MIN, FB_P_MAX = -12.5, 12.5
+FB_V_MIN, FB_V_MAX = -65.0, 65.0
+FB_T_MIN, FB_T_MAX = -50.0, 50.0
 
 
 # ── CAN helpers ───────────────────────────────────────────────────────────────
@@ -120,6 +134,28 @@ def set_state(bus, node_id, state):
 def float_to_uint(x, x_min, x_max, bits):
     x = max(x_min, min(x_max, x))
     return int((x - x_min) / (x_max - x_min) * ((1 << bits) - 1))
+
+
+def uint_to_float(x_int, x_min, x_max, bits):
+    return x_int * (x_max - x_min) / ((1 << bits) - 1) + x_min
+
+
+def parse_mit_feedback(data):
+    """Decode an MIT feedback frame → (pos_rad, vel_rads, torque_nm).
+    Byte 0:    node_id echo
+    Bytes 1-2: position 16-bit  [-12.5, +12.5] rad
+    Bytes 3,4hi: velocity 12-bit [-65, +65] rad/s
+    Bytes 4lo,5: torque 12-bit  [-50, +50] Nm
+    Returns None if frame is too short."""
+    if len(data) < 6:
+        return None
+    pos_raw  = (data[1] << 8) | data[2]
+    vel_raw  = (data[3] << 4) | (data[4] >> 4)
+    torq_raw = ((data[4] & 0xF) << 8) | data[5]
+    pos_rad   = uint_to_float(pos_raw,  FB_P_MIN, FB_P_MAX, 16)
+    vel_rads  = uint_to_float(vel_raw,  FB_V_MIN, FB_V_MAX, 12)
+    torque_nm = uint_to_float(torq_raw, FB_T_MIN, FB_T_MAX, 12)
+    return pos_rad, vel_rads, torque_nm
 
 
 def send_mit(bus, node_id, pos_rad, vel=0.0, kp=DEFAULT_KP, kd=DEFAULT_KD, torque=0.0):
@@ -285,7 +321,8 @@ def capture_pose(bus, node_ids, name_by_node, limits_by_node, prompt):
 def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
                 gains_by_node, turn_offsets,
                 move_time=MOVE_TIME, dwell_time=DWELL_TIME,
-                label=''):
+                label='', csv_writer=None, kp_run=None, move_num=None,
+                phase_label=''):
     """Smooth-interpolate from start_pos to end_pos, then dwell at end_pos.
 
     start_pos, end_pos: positions in wrapped [-π, +π] space.
@@ -293,8 +330,13 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
     turn_offsets[nid]: added to every MIT command so the firmware sees a target
         in its multi-turn coordinate (handles GIM multi-turn drift across boots).
 
-    Tracks max |error| seen during the move + steady-state error after dwell."""
+    csv_writer: optional csv.DictWriter to log per-tick rows for sim comparison.
+    kp_run, move_num, phase_label: identifiers written into each CSV row.
+
+    Tracks max |error| seen during the move + steady-state error after dwell.
+    Also tracks torque feedback from MIT response frames."""
     enc_ids = {can_id(nid, CMD_ENC_EST): nid for nid in node_ids}
+    mit_ids = {can_id(nid, CMD_MIT):     nid for nid in node_ids}
 
     print(f"\n  ▶ {label}")
     for nid in node_ids:
@@ -303,8 +345,53 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
         kp, kd = gains_by_node[nid]
         print(f"      {name_by_node[nid]:12s} (node {nid}):  {s:+.4f} → {e:+.4f} rad   kp={kp:.0f} kd={kd:.1f}")
 
-    max_err   = {nid: 0.0 for nid in node_ids}
-    last_pos  = {nid: start_pos.get(nid, 0.0) for nid in node_ids}
+    max_err    = {nid: 0.0 for nid in node_ids}
+    last_pos   = {nid: start_pos.get(nid, 0.0) for nid in node_ids}  # from CMD_ENC_EST (wrapped)
+    mit_pos    = {nid: float('nan') for nid in node_ids}             # from MIT feedback (wrapped)
+    mit_vel    = {nid: float('nan') for nid in node_ids}
+    last_torq  = {nid: float('nan') for nid in node_ids}
+    max_torq   = {nid: 0.0 for nid in node_ids}
+
+    def pump_can():
+        """Drain queued CAN frames, updating last_pos / mit_pos / mit_vel / last_torq."""
+        r = bus.recv(timeout=0.0)
+        while r is not None:
+            if r.arbitration_id in enc_ids:
+                nid = enc_ids[r.arbitration_id]
+                pos_rev = struct.unpack_from('<f', bytes(r.data), 0)[0]
+                last_pos[nid] = wrap_to_pi(pos_rev * 2 * math.pi / GEAR_RATIO)
+            elif r.arbitration_id in mit_ids:
+                nid = mit_ids[r.arbitration_id]
+                fb = parse_mit_feedback(bytes(r.data))
+                if fb is not None:
+                    p, v, torque = fb
+                    mit_pos[nid]   = wrap_to_pi(p)
+                    mit_vel[nid]   = v
+                    last_torq[nid] = torque
+                    if abs(torque) > max_torq[nid]:
+                        max_torq[nid] = abs(torque)
+            r = bus.recv(timeout=0.0)
+
+    def log_row(elapsed, phase, nid, cmd_wrapped):
+        """Append one CSV row for one joint at one tick (if csv_writer is set)."""
+        if csv_writer is None:
+            return
+        kp, kd = gains_by_node[nid]
+        csv_writer.writerow({
+            't':           f"{elapsed:.4f}",
+            'kp_run':      kp_run,
+            'move_num':    move_num,
+            'phase':       phase,
+            'joint':       name_by_node[nid],
+            'node_id':     nid,
+            'target':      f"{cmd_wrapped:+.6f}",
+            'enc_pos':     f"{last_pos[nid]:+.6f}",
+            'mit_pos':     f"{mit_pos[nid]:+.6f}" if not math.isnan(mit_pos[nid]) else '',
+            'mit_vel':     f"{mit_vel[nid]:+.6f}" if not math.isnan(mit_vel[nid]) else '',
+            'mit_torque':  f"{last_torq[nid]:+.6f}" if not math.isnan(last_torq[nid]) else '',
+            'kp':          kp,
+            'kd':          kd,
+        })
 
     move_start = time.time()
     while True:
@@ -313,15 +400,7 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
             break
         alpha = smoothstep(elapsed / move_time)
 
-        # Pump any encoder frames in the queue so we can track error live.
-        # Wrap to [-π, +π] to match start_pos/end_pos space.
-        r = bus.recv(timeout=0.0)
-        while r is not None:
-            if r.arbitration_id in enc_ids:
-                nid = enc_ids[r.arbitration_id]
-                pos_rev = struct.unpack_from('<f', bytes(r.data), 0)[0]
-                last_pos[nid] = wrap_to_pi(pos_rev * 2 * math.pi / GEAR_RATIO)
-            r = bus.recv(timeout=0.0)
+        pump_can()
 
         for nid in node_ids:
             s = start_pos.get(nid, 0.0)
@@ -330,19 +409,24 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
             cmd_raw = cmd_wrapped + turn_offsets.get(nid, 0.0)
             kp, kd = gains_by_node[nid]
             send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
-            # Error tracking in wrapped space (last_pos is already wrapped from drain)
-            err = abs(last_pos[nid] - cmd_wrapped)
+            # Error tracking in wrapped space; wrap diff to avoid boundary inflation
+            err = abs(wrap_to_pi(last_pos[nid] - cmd_wrapped))
             if err > max_err[nid]:
                 max_err[nid] = err
+            log_row(elapsed, 'move', nid, cmd_wrapped)
         time.sleep(DT)
 
     # Hold at end position
     dwell_end = time.time() + dwell_time
     while time.time() < dwell_end:
+        pump_can()
+        elapsed = time.time() - move_start
         for nid in node_ids:
-            cmd_raw = end_pos.get(nid, 0.0) + turn_offsets.get(nid, 0.0)
+            e = end_pos.get(nid, 0.0)
+            cmd_raw = e + turn_offsets.get(nid, 0.0)
             kp, kd = gains_by_node[nid]
             send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
+            log_row(elapsed, 'dwell', nid, e)
         time.sleep(DT)
 
     elapsed_total = time.time() - move_start
@@ -350,8 +434,9 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
 
     # Final steady-state read
     actual = drain_positions(bus, node_ids, duration=0.2)
-    print(f"      {'joint':<12}  {'target':>10}  {'actual':>10}  {'final_err':>10}  {'max_err':>10}")
-    print(f"      {'-' * 60}")
+    print(f"      {'joint':<12}  {'target':>10}  {'actual':>10}  "
+          f"{'final_err':>10}  {'max_err':>10}  {'hold_τ':>9}  {'max_τ':>9}")
+    print(f"      {'-' * 82}")
     for nid in node_ids:
         target = end_pos.get(nid, 0.0)
         act    = actual.get(nid, float('nan'))
@@ -359,9 +444,13 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
         # appear as a ~6.28 rad error.
         ferr   = wrap_to_pi(act - target) if not math.isnan(act) else float('nan')
         merr   = max_err[nid]
+        ltq    = last_torq[nid]
+        mtq    = max_torq[nid]
         flag   = '  <-- check' if (not math.isnan(ferr) and abs(ferr) > 0.1) or merr > 0.2 else ''
+        ltq_s  = f"{ltq:>+8.2f}N" if not math.isnan(ltq) else "    n/a "
+        mtq_s  = f"{mtq:>8.2f}N"
         print(f"      {name_by_node[nid]:<12}  {target:>+10.4f}  {act:>+10.4f}  "
-              f"{ferr:>+10.4f}  {merr:>10.4f}{flag}")
+              f"{ferr:>+10.4f}  {merr:>10.4f}  {ltq_s}  {mtq_s}{flag}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -383,7 +472,14 @@ def main():
     parser.add_argument('--gains', default=None,
                         help='Path to JSON file with per-joint kp/kd overrides '
                              '({"joint_name": {"kp": N, "kd": M}, ...}). '
-                             'Missing joints fall back to --kp/--kd.')
+                             'Missing joints fall back to --kp/--kd. '
+                             'Disables the default kp sweep.')
+    parser.add_argument('--no-sweep', action='store_true',
+                        help='Disable the kp=[50,100,150] sweep; run the 3-move '
+                             'sequence once with --kp/--kd or --gains.')
+    parser.add_argument('--csv', default=None,
+                        help='Path to write time-series CSV (default: auto-generated '
+                             'in CWD as leg_test_<leg>_<timestamp>.csv).')
     args = parser.parse_args()
 
     leg_cfg     = LEGS[args.leg]
@@ -518,17 +614,64 @@ def main():
                 go_idle()
                 return
 
-        # ── Step 6: Motion sequence ──────────────────────────────────────────
-        print("\nStep 5: Executing motion sequence...")
-        smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos,
-                    gains_by_node, turn_offsets,
-                    label=f"Move 1/3 — Hanging → Zero  ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos,
-                    gains_by_node, turn_offsets,
-                    label=f"Move 2/3 — Zero → Target   ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos,
-                    gains_by_node, turn_offsets,
-                    label=f"Move 3/3 — Target → Zero   ({MOVE_TIME:.0f}s)")
+        # ── Step 6: Motion sequence (kp sweep with CSV logging) ──────────────
+        # Decide whether to sweep or run a single configuration
+        do_sweep = (not args.no_sweep) and (args.gains is None)
+        kp_values = KP_SWEEP if do_sweep else [args.kp]
+
+        # Open CSV writer
+        csv_path = args.csv or os.path.join(
+            os.getcwd(),
+            f"leg_test_{args.leg}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
+        csv_fields = ['t', 'kp_run', 'move_num', 'phase', 'joint', 'node_id',
+                      'target', 'enc_pos', 'mit_pos', 'mit_vel', 'mit_torque',
+                      'kp', 'kd']
+        csv_file = open(csv_path, 'w', newline='')
+        csv_writer = csv.DictWriter(csv_file, fieldnames=csv_fields)
+        csv_writer.writeheader()
+        print(f"\nStep 5: Motion sequence  (CSV → {csv_path})")
+        if do_sweep:
+            print(f"  kp sweep: {kp_values}")
+        else:
+            print(f"  single run (no sweep)")
+
+        try:
+            reset_gains = {nid: (RESET_KP, RESET_KD) for nid in node_ids}
+
+            for sweep_i, kp_run in enumerate(kp_values):
+                print(f"\n══ kp = {kp_run} ══")
+
+                # Build gains for this sweep iteration. If do_sweep, override
+                # all joints uniformly. Otherwise use the gains_by_node built
+                # earlier from --kp/--kd/--gains.
+                if do_sweep:
+                    sweep_gains = {nid: (kp_run, args.kd) for nid in node_ids}
+                else:
+                    sweep_gains = gains_by_node
+
+                # Before sweeps 2 and 3, gently return to hanging position so
+                # each sweep starts from the same physical state. Not logged.
+                if sweep_i > 0:
+                    smooth_move(bus, node_ids, name_by_node, zero_pos, hanging_pos,
+                                reset_gains, turn_offsets,
+                                label=f"Reset → hanging  (kp={RESET_KP})")
+
+                smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos,
+                            sweep_gains, turn_offsets,
+                            label=f"Move 1/3 — Hanging → Zero  ({MOVE_TIME:.0f}s)",
+                            csv_writer=csv_writer, kp_run=kp_run, move_num=1)
+                smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos,
+                            sweep_gains, turn_offsets,
+                            label=f"Move 2/3 — Zero → Target   ({MOVE_TIME:.0f}s)",
+                            csv_writer=csv_writer, kp_run=kp_run, move_num=2)
+                smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos,
+                            sweep_gains, turn_offsets,
+                            label=f"Move 3/3 — Target → Zero   ({MOVE_TIME:.0f}s)",
+                            csv_writer=csv_writer, kp_run=kp_run, move_num=3)
+        finally:
+            csv_file.close()
+            print(f"\nCSV written: {csv_path}")
 
         # ── Done ─────────────────────────────────────────────────────────────
         print("\nStep 6: Motion complete. Setting all joints to IDLE.")

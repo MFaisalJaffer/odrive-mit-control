@@ -14,13 +14,33 @@ Workflow:
   6. All joints return to IDLE.
 
 Usage:
+  # Global gains (default kp=50, kd=2.0 — intentionally low for first run):
   python3 leg_test.py --leg right --urdf /path/to/robot.urdf
-  python3 leg_test.py --leg left  --urdf /path/to/robot.urdf
-  python3 leg_test.py --leg right --urdf .../robot.urdf --can can2   # override CAN
+  python3 leg_test.py --leg right --urdf .../robot.urdf --kp 120 --kd 2.5
+
+  # Per-joint override via JSON file (any joints missing from the file fall
+  # back to the global --kp/--kd):
+  python3 leg_test.py --leg right --urdf .../robot.urdf --gains gains.json
+
+  gains.json format:
+    {
+      "hip_pitch": {"kp": 100, "kd": 2.5},
+      "knee":      {"kp": 250, "kd": 3.5}
+    }
+
+Tuning tips:
+  - Start with the defaults (kp=50, kd=2). Run the three-move sequence and
+    look at the per-joint 'error' column in each summary table.
+  - For joints that overshoot or oscillate, raise kd first.
+  - For joints with too much steady-state error, raise kp. Watch for
+    oscillation as you raise kp; if it starts, back off and raise kd.
+  - These actuators saturate at ~18 Nm so very high kp won't help once you're
+    torque-limited — at that point you'd need feedforward (see docs).
 """
 
 import argparse
 import can
+import json
 import math
 import select
 import struct
@@ -33,7 +53,8 @@ GEAR_RATIO     = 8.0
 MOVE_TIME      = 3.0     # seconds per move
 DWELL_TIME     = 1.0     # seconds to hold at each waypoint
 DT             = 0.01    # 100 Hz loop
-EFFORT         = 50.0    # kp gain during smooth moves
+DEFAULT_KP     = 50.0    # Default kp — start low, tune up
+DEFAULT_KD     = 2.0     # Default kd
 PASSIVE_KP     = 0.0     # kp for pose-capture passive mode
 PASSIVE_KD     = 0.0     # kd for pose-capture passive mode
 SAFETY_MARGIN  = 0.05    # rad — added to URDF limits for the initial range check
@@ -101,7 +122,7 @@ def float_to_uint(x, x_min, x_max, bits):
     return int((x - x_min) / (x_max - x_min) * ((1 << bits) - 1))
 
 
-def send_mit(bus, node_id, pos_rad, vel=0.0, kp=EFFORT, kd=2.0, torque=0.0):
+def send_mit(bus, node_id, pos_rad, vel=0.0, kp=DEFAULT_KP, kd=DEFAULT_KD, torque=0.0):
     p   = float_to_uint(pos_rad, MIT_P_MIN, MIT_P_MAX, 16)
     v   = float_to_uint(vel,     MIT_V_MIN, MIT_V_MAX, 12)
     kp_ = float_to_uint(kp,      MIT_KP_MIN, MIT_KP_MAX, 12)
@@ -261,16 +282,29 @@ def capture_pose(bus, node_ids, name_by_node, limits_by_node, prompt):
 
 
 # ── Smooth move ───────────────────────────────────────────────────────────────
-def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos, turn_offsets,
+def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
+                gains_by_node, turn_offsets,
                 move_time=MOVE_TIME, dwell_time=DWELL_TIME,
-                kp=EFFORT, kd=2.0, label=''):
-    """All positions are in wrapped [-π, +π] space. `turn_offsets[nid]` is added
-    to every MIT command so the firmware sees a target in its multi-turn coord."""
+                label=''):
+    """Smooth-interpolate from start_pos to end_pos, then dwell at end_pos.
+
+    start_pos, end_pos: positions in wrapped [-π, +π] space.
+    gains_by_node: {node_id: (kp, kd)} per-joint gains.
+    turn_offsets[nid]: added to every MIT command so the firmware sees a target
+        in its multi-turn coordinate (handles GIM multi-turn drift across boots).
+
+    Tracks max |error| seen during the move + steady-state error after dwell."""
+    enc_ids = {can_id(nid, CMD_ENC_EST): nid for nid in node_ids}
+
     print(f"\n  ▶ {label}")
     for nid in node_ids:
         s = start_pos.get(nid, 0.0)
         e = end_pos.get(nid, 0.0)
-        print(f"      {name_by_node[nid]:12s} (node {nid}):  {s:+.4f} → {e:+.4f} rad")
+        kp, kd = gains_by_node[nid]
+        print(f"      {name_by_node[nid]:12s} (node {nid}):  {s:+.4f} → {e:+.4f} rad   kp={kp:.0f} kd={kd:.1f}")
+
+    max_err   = {nid: 0.0 for nid in node_ids}
+    last_pos  = {nid: start_pos.get(nid, 0.0) for nid in node_ids}
 
     move_start = time.time()
     while True:
@@ -278,12 +312,28 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos, turn_offsets,
         if elapsed >= move_time:
             break
         alpha = smoothstep(elapsed / move_time)
+
+        # Pump any encoder frames in the queue so we can track error live.
+        # Wrap to [-π, +π] to match start_pos/end_pos space.
+        r = bus.recv(timeout=0.0)
+        while r is not None:
+            if r.arbitration_id in enc_ids:
+                nid = enc_ids[r.arbitration_id]
+                pos_rev = struct.unpack_from('<f', bytes(r.data), 0)[0]
+                last_pos[nid] = wrap_to_pi(pos_rev * 2 * math.pi / GEAR_RATIO)
+            r = bus.recv(timeout=0.0)
+
         for nid in node_ids:
             s = start_pos.get(nid, 0.0)
             e = end_pos.get(nid, 0.0)
             cmd_wrapped = s + (e - s) * alpha
             cmd_raw = cmd_wrapped + turn_offsets.get(nid, 0.0)
+            kp, kd = gains_by_node[nid]
             send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
+            # Error tracking in wrapped space (last_pos is already wrapped from drain)
+            err = abs(last_pos[nid] - cmd_wrapped)
+            if err > max_err[nid]:
+                max_err[nid] = err
         time.sleep(DT)
 
     # Hold at end position
@@ -291,20 +341,27 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos, turn_offsets,
     while time.time() < dwell_end:
         for nid in node_ids:
             cmd_raw = end_pos.get(nid, 0.0) + turn_offsets.get(nid, 0.0)
+            kp, kd = gains_by_node[nid]
             send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
         time.sleep(DT)
 
     elapsed_total = time.time() - move_start
     print(f"      reached in {elapsed_total:.2f}s")
 
+    # Final steady-state read
     actual = drain_positions(bus, node_ids, duration=0.2)
-    print(f"      {'joint':<12}  {'target':>10}  {'actual':>10}  {'error':>10}")
-    print(f"      {'-' * 48}")
+    print(f"      {'joint':<12}  {'target':>10}  {'actual':>10}  {'final_err':>10}  {'max_err':>10}")
+    print(f"      {'-' * 60}")
     for nid in node_ids:
         target = end_pos.get(nid, 0.0)
         act    = actual.get(nid, float('nan'))
-        err    = act - target
-        print(f"      {name_by_node[nid]:<12}  {target:>+10.4f}  {act:>+10.4f}  {err:>+10.4f} rad")
+        # Wrap the diff so a tiny motion crossing the ±π boundary doesn't
+        # appear as a ~6.28 rad error.
+        ferr   = wrap_to_pi(act - target) if not math.isnan(act) else float('nan')
+        merr   = max_err[nid]
+        flag   = '  <-- check' if (not math.isnan(ferr) and abs(ferr) > 0.1) or merr > 0.2 else ''
+        print(f"      {name_by_node[nid]:<12}  {target:>+10.4f}  {act:>+10.4f}  "
+              f"{ferr:>+10.4f}  {merr:>10.4f}{flag}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -319,6 +376,14 @@ def main():
                         help='Path to URDF for joint-limit safety check')
     parser.add_argument('--can', default=None,
                         help='Override CAN interface (default: right=can0, left=can1)')
+    parser.add_argument('--kp', type=float, default=DEFAULT_KP,
+                        help=f'Global default kp (default {DEFAULT_KP})')
+    parser.add_argument('--kd', type=float, default=DEFAULT_KD,
+                        help=f'Global default kd (default {DEFAULT_KD})')
+    parser.add_argument('--gains', default=None,
+                        help='Path to JSON file with per-joint kp/kd overrides '
+                             '({"joint_name": {"kp": N, "kd": M}, ...}). '
+                             'Missing joints fall back to --kp/--kd.')
     args = parser.parse_args()
 
     leg_cfg     = LEGS[args.leg]
@@ -336,6 +401,25 @@ def main():
         sys.exit(1)
     limits_by_node = {nid: urdf_limits[urdf_name_by_node[nid]] for nid in node_ids}
 
+    # Per-joint gains: start with global defaults, override from --gains JSON
+    gains_by_node = {nid: (args.kp, args.kd) for nid in node_ids}
+    if args.gains:
+        try:
+            with open(args.gains) as f:
+                raw = json.load(f)
+        except Exception as e:
+            print(f"ERROR loading --gains file: {e}")
+            sys.exit(1)
+        name_to_node = {name_by_node[nid]: nid for nid in node_ids}
+        for jname, vals in raw.items():
+            if jname not in name_to_node:
+                print(f"  WARNING: --gains has unknown joint '{jname}' (ignored)")
+                continue
+            nid = name_to_node[jname]
+            kp_ovr = float(vals.get('kp', args.kp))
+            kd_ovr = float(vals.get('kd', args.kd))
+            gains_by_node[nid] = (kp_ovr, kd_ovr)
+
     # Banner
     print('=' * 64)
     print(f"        {args.leg.upper()} LEG MOTION TEST")
@@ -345,10 +429,12 @@ def main():
     print(f"Gear ratio    : {GEAR_RATIO}")
     print(f"Safety margin : {SAFETY_MARGIN:+.3f} rad on each URDF limit")
     print()
-    print("Joints (URDF limits):")
+    print("Joints (URDF limits + gains):")
     for nid in node_ids:
         lo, hi = limits_by_node[nid]
-        print(f"  node {nid:>2}  {name_by_node[nid]:<12} {urdf_name_by_node[nid]:<28} [{lo:+.3f}, {hi:+.3f}] rad")
+        kp, kd = gains_by_node[nid]
+        print(f"  node {nid:>2}  {name_by_node[nid]:<12} {urdf_name_by_node[nid]:<28} "
+              f"[{lo:+.3f}, {hi:+.3f}] rad   kp={kp:>5.1f}  kd={kd:>4.1f}")
     print()
 
     bus = can.interface.Bus(channel=can_iface, interface='socketcan')
@@ -434,11 +520,14 @@ def main():
 
         # ── Step 6: Motion sequence ──────────────────────────────────────────
         print("\nStep 5: Executing motion sequence...")
-        smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos, turn_offsets,
+        smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos,
+                    gains_by_node, turn_offsets,
                     label=f"Move 1/3 — Hanging → Zero  ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos, turn_offsets,
+        smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos,
+                    gains_by_node, turn_offsets,
                     label=f"Move 2/3 — Zero → Target   ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos, turn_offsets,
+        smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos,
+                    gains_by_node, turn_offsets,
                     label=f"Move 3/3 — Target → Zero   ({MOVE_TIME:.0f}s)")
 
         # ── Done ─────────────────────────────────────────────────────────────

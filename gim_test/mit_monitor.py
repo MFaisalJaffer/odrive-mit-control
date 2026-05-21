@@ -63,6 +63,11 @@ def uint_to_float(x_int, x_min, x_max, bits):
     return x_int * (x_max - x_min) / ((1 << bits) - 1) + x_min
 
 
+def wrap_to_pi(x):
+    """Wrap angle to [-π, +π] so multi-turn drift doesn't show up in display."""
+    return ((x + math.pi) % (2 * math.pi)) - math.pi
+
+
 def send_mit_zero(bus, node_id):
     """Send MIT with zero kp/kd/torque — motor is free, feedback is returned."""
     p   = float_to_uint(0.0, MIT_P_MIN, MIT_P_MAX, 16)
@@ -197,6 +202,7 @@ def main():
                         label = cfg['joints'][nid]
                         if nid in latest:
                             pos, vel, torq = latest[nid]
+                            pos = wrap_to_pi(pos)
                             lines.append(
                                 f"  {label:12s} (node {nid:2d})  "
                                 f"pos={pos:+7.4f} rad  "

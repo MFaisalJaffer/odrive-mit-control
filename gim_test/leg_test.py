@@ -130,8 +130,12 @@ def passive_burst(bus, node_ids, frames=20):
         time.sleep(DT)
 
 
-def drain_positions(bus, node_ids, duration=0.5):
-    """Listen for `duration` seconds; return latest pos per node (rad)."""
+def drain_positions(bus, node_ids, duration=0.5, wrap=True):
+    """Listen for `duration` seconds; return latest pos per node (rad).
+
+    If wrap=True (default), positions are normalized to [-π, +π] so multi-turn
+    firmware drift doesn't pollute the reading. Set wrap=False to get the raw
+    multi-turn value (only needed when computing turn offsets)."""
     enc_ids = {can_id(nid, CMD_ENC_EST): nid for nid in node_ids}
     positions = {}
     deadline = time.time() + duration
@@ -140,7 +144,8 @@ def drain_positions(bus, node_ids, duration=0.5):
         if r and r.arbitration_id in enc_ids:
             nid = enc_ids[r.arbitration_id]
             pos_rev = struct.unpack_from('<f', bytes(r.data), 0)[0]
-            positions[nid] = pos_rev * 2 * math.pi / GEAR_RATIO
+            pos_rad = pos_rev * 2 * math.pi / GEAR_RATIO
+            positions[nid] = wrap_to_pi(pos_rad) if wrap else pos_rad
     return positions
 
 
@@ -149,13 +154,32 @@ def smoothstep(t):
     return t * t * (3.0 - 2.0 * t)
 
 
+def wrap_to_pi(x):
+    """Wrap angle to [-π, +π]. None passes through."""
+    if x is None:
+        return None
+    return ((x + math.pi) % (2 * math.pi)) - math.pi
+
+
+def compute_turn_offsets(raw_positions):
+    """Per-joint integer-multiple-of-2π offset: raw - wrap_to_pi(raw).
+
+    Applied to commands so MIT targets stay in the firmware's current
+    multi-turn coordinate even though we plan motion in wrapped [-π, +π] space."""
+    return {nid: (raw - wrap_to_pi(raw)) for nid, raw in raw_positions.items()
+            if raw is not None}
+
+
 # ── URDF parsing ──────────────────────────────────────────────────────────────
 def parse_urdf_limits(urdf_path, urdf_joint_names):
-    """Return {urdf_joint_name: (lower_rad, upper_rad)}. Raises if any missing."""
+    """Return {urdf_joint_name: (lower_rad, upper_rad)}. Raises if any missing.
+
+    Only looks at top-level <joint> elements (the kinematic tree), not the
+    duplicate <joint> entries inside <ros2_control> which lack <limit>."""
     tree = ET.parse(urdf_path)
     root = tree.getroot()
     found = {}
-    for j in root.iter('joint'):
+    for j in root.findall('joint'):
         name = j.get('name')
         if name in urdf_joint_names:
             lim = j.find('limit')
@@ -212,7 +236,7 @@ def capture_pose(bus, node_ids, name_by_node, limits_by_node, prompt):
         if r and r.arbitration_id in enc_ids:
             nid = enc_ids[r.arbitration_id]
             pos_rev = struct.unpack_from('<f', bytes(r.data), 0)[0]
-            live_pos[nid] = pos_rev * 2 * math.pi / GEAR_RATIO
+            live_pos[nid] = wrap_to_pi(pos_rev * 2 * math.pi / GEAR_RATIO)
 
         if live_pos and (now - last_print > 0.05):  # 20 Hz display
             line = '  '
@@ -237,9 +261,11 @@ def capture_pose(bus, node_ids, name_by_node, limits_by_node, prompt):
 
 
 # ── Smooth move ───────────────────────────────────────────────────────────────
-def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
+def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos, turn_offsets,
                 move_time=MOVE_TIME, dwell_time=DWELL_TIME,
                 kp=EFFORT, kd=2.0, label=''):
+    """All positions are in wrapped [-π, +π] space. `turn_offsets[nid]` is added
+    to every MIT command so the firmware sees a target in its multi-turn coord."""
     print(f"\n  ▶ {label}")
     for nid in node_ids:
         s = start_pos.get(nid, 0.0)
@@ -255,15 +281,17 @@ def smooth_move(bus, node_ids, name_by_node, start_pos, end_pos,
         for nid in node_ids:
             s = start_pos.get(nid, 0.0)
             e = end_pos.get(nid, 0.0)
-            cmd = s + (e - s) * alpha
-            send_mit(bus, nid, cmd, kp=kp, kd=kd)
+            cmd_wrapped = s + (e - s) * alpha
+            cmd_raw = cmd_wrapped + turn_offsets.get(nid, 0.0)
+            send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
         time.sleep(DT)
 
     # Hold at end position
     dwell_end = time.time() + dwell_time
     while time.time() < dwell_end:
         for nid in node_ids:
-            send_mit(bus, nid, end_pos.get(nid, 0.0), kp=kp, kd=kd)
+            cmd_raw = end_pos.get(nid, 0.0) + turn_offsets.get(nid, 0.0)
+            send_mit(bus, nid, cmd_raw, kp=kp, kd=kd)
         time.sleep(DT)
 
     elapsed_total = time.time() - move_start
@@ -336,7 +364,19 @@ def main():
             set_state(bus, nid, AXIS_STATE_CLOSED_LOOP)
         time.sleep(0.8)
         passive_burst(bus, node_ids, frames=30)  # ~300ms of passive MIT
-        initial = drain_positions(bus, node_ids, duration=0.5)
+        # Read raw multi-turn positions to compute per-joint turn-offset.
+        # All downstream logic uses wrapped [-π, +π] positions; commands add
+        # the offset back so the firmware sees a sub-2π target.
+        initial_raw = drain_positions(bus, node_ids, duration=0.5, wrap=False)
+        turn_offsets = compute_turn_offsets(initial_raw)
+        initial = {nid: wrap_to_pi(p) for nid, p in initial_raw.items()}
+        if turn_offsets:
+            print("  Turn offsets (will be added to MIT commands):")
+            for nid in node_ids:
+                off = turn_offsets.get(nid)
+                if off is not None and abs(off) > 1e-6:
+                    print(f"    {name_by_node[nid]:<12} (node {nid}): "
+                          f"{off:+.4f} rad  ({off / (2 * math.pi):+.2f} × 2π)")
 
         # ── Step 2: Initial range check ──────────────────────────────────────
         print("\nStep 2: Initial position range check")
@@ -394,11 +434,11 @@ def main():
 
         # ── Step 6: Motion sequence ──────────────────────────────────────────
         print("\nStep 5: Executing motion sequence...")
-        smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos,
+        smooth_move(bus, node_ids, name_by_node, hanging_pos, zero_pos, turn_offsets,
                     label=f"Move 1/3 — Hanging → Zero  ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos,
+        smooth_move(bus, node_ids, name_by_node, zero_pos, target_pos, turn_offsets,
                     label=f"Move 2/3 — Zero → Target   ({MOVE_TIME:.0f}s)")
-        smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos,
+        smooth_move(bus, node_ids, name_by_node, target_pos, zero_pos, turn_offsets,
                     label=f"Move 3/3 — Target → Zero   ({MOVE_TIME:.0f}s)")
 
         # ── Done ─────────────────────────────────────────────────────────────

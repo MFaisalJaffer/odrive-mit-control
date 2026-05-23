@@ -10,8 +10,8 @@ Workflow:
      Abort if any joint is out of range or unreadable.
   3. User poses BOTH legs to the desired TARGET → ENTER → recorded.
   4. User moves BOTH legs to HANGING (straight down) → ENTER → recorded.
-  5. Single 3-move sequence at kp=100 (override with --kp):
-        Hanging → Zero → Target → Zero
+  5. Single 4-move sequence at kp=100 (override with --kp):
+        Hanging → Zero → Target → Zero → Hanging
      Per-tick CSV is written for sim comparison.
   6. All joints return to IDLE.
 
@@ -73,6 +73,7 @@ LEG_TO_CAN = {'right': 'can0', 'left': 'can1'}
 CMD_ENC_EST   = 0x009
 CMD_SET_STATE = 0x007
 CMD_MIT       = 0x008
+CMD_GET_IQ    = 0x014   # Iq_setpoint (float32 A) + Iq_measured (float32 A)
 
 AXIS_STATE_IDLE        = 1
 AXIS_STATE_CLOSED_LOOP = 8
@@ -293,6 +294,7 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
     """Coordinate one smooth move across both legs simultaneously."""
     enc_id_to_nid = {(leg_by_node[nid], can_id(nid, CMD_ENC_EST)): nid for nid in node_ids}
     mit_id_to_nid = {(leg_by_node[nid], can_id(nid, CMD_MIT)):     nid for nid in node_ids}
+    iq_id_to_nid  = {(leg_by_node[nid], can_id(nid, CMD_GET_IQ)):  nid for nid in node_ids}
 
     print(f"\n  ▶ {label}")
     for nid in node_ids:
@@ -302,12 +304,15 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
         print(f"      {leg_by_node[nid]:<6} {name_by_node[nid]:<11} (node {nid:>2}):  "
               f"{s:+.4f} → {e:+.4f} rad   kp={kp:.0f} kd={kd:.1f}")
 
-    max_err   = {nid: 0.0 for nid in node_ids}
-    last_pos  = {nid: start_pos.get(nid, 0.0) for nid in node_ids}
-    mit_pos   = {nid: float('nan') for nid in node_ids}
-    mit_vel   = {nid: float('nan') for nid in node_ids}
-    last_torq = {nid: float('nan') for nid in node_ids}
-    max_torq  = {nid: 0.0 for nid in node_ids}
+    max_err     = {nid: 0.0 for nid in node_ids}
+    last_pos    = {nid: start_pos.get(nid, 0.0) for nid in node_ids}
+    mit_pos     = {nid: float('nan') for nid in node_ids}
+    mit_vel     = {nid: float('nan') for nid in node_ids}
+    last_torq   = {nid: float('nan') for nid in node_ids}
+    max_torq    = {nid: 0.0 for nid in node_ids}
+    iq_set      = {nid: float('nan') for nid in node_ids}
+    iq_meas     = {nid: float('nan') for nid in node_ids}
+    max_iq_meas = {nid: 0.0 for nid in node_ids}
 
     def pump_can():
         for leg, bus in buses.items():
@@ -328,6 +333,12 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
                         last_torq[nid] = torque
                         if abs(torque) > max_torq[nid]:
                             max_torq[nid] = abs(torque)
+                elif key in iq_id_to_nid and len(r.data) >= 8:
+                    nid = iq_id_to_nid[key]
+                    iq_set[nid]  = struct.unpack_from('<f', bytes(r.data), 0)[0]
+                    iq_meas[nid] = struct.unpack_from('<f', bytes(r.data), 4)[0]
+                    if abs(iq_meas[nid]) > max_iq_meas[nid]:
+                        max_iq_meas[nid] = abs(iq_meas[nid])
                 r = bus.recv(timeout=0.0)
 
     def log_row(elapsed, phase, nid, cmd_wrapped):
@@ -347,6 +358,8 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
             'mit_pos':     f"{mit_pos[nid]:+.6f}" if not math.isnan(mit_pos[nid]) else '',
             'mit_vel':     f"{mit_vel[nid]:+.6f}" if not math.isnan(mit_vel[nid]) else '',
             'mit_torque':  f"{last_torq[nid]:+.6f}" if not math.isnan(last_torq[nid]) else '',
+            'iq_set':      f"{iq_set[nid]:+.6f}"  if not math.isnan(iq_set[nid])  else '',
+            'iq_meas':     f"{iq_meas[nid]:+.6f}" if not math.isnan(iq_meas[nid]) else '',
             'kp':          kp,
             'kd':          kd,
         })
@@ -390,8 +403,9 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
     actual = drain_positions({l: buses[l] for l in buses}, node_ids,
                               leg_by_node, duration=0.2)
     print(f"      {'leg':<6} {'joint':<11}  {'target':>9}  {'actual':>9}  "
-          f"{'final_err':>10}  {'max_err':>8}  {'hold_τ':>8}  {'max_τ':>8}")
-    print(f"      {'-' * 86}")
+          f"{'final_err':>10}  {'max_err':>8}  {'hold_τ':>8}  {'max_τ':>8}  "
+          f"{'iq_meas':>8}  {'max_iq':>8}")
+    print(f"      {'-' * 106}")
     for nid in node_ids:
         target = end_pos.get(nid, 0.0)
         act    = actual.get(nid, float('nan'))
@@ -399,12 +413,16 @@ def smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
         merr   = max_err[nid]
         ltq    = last_torq[nid]
         mtq    = max_torq[nid]
+        liq    = iq_meas[nid]
+        miq    = max_iq_meas[nid]
         flag   = '  <-- check' if (not math.isnan(ferr) and abs(ferr) > 0.1) or merr > 0.2 else ''
         ltq_s  = f"{ltq:>+7.2f}N" if not math.isnan(ltq) else "   n/a "
         mtq_s  = f"{mtq:>7.2f}N"
+        liq_s  = f"{liq:>+7.2f}A" if not math.isnan(liq) else "   n/a "
+        miq_s  = f"{miq:>7.2f}A"
         print(f"      {leg_by_node[nid]:<6} {name_by_node[nid]:<11}  "
               f"{target:>+9.4f}  {act:>+9.4f}  {ferr:>+10.4f}  "
-              f"{merr:>8.4f}  {ltq_s}  {mtq_s}{flag}")
+              f"{merr:>8.4f}  {ltq_s}  {mtq_s}  {liq_s}  {miq_s}{flag}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -563,7 +581,7 @@ def main():
         )
         csv_fields = ['t', 'kp_run', 'move_num', 'phase', 'leg', 'joint',
                       'node_id', 'target', 'enc_pos', 'mit_pos', 'mit_vel',
-                      'mit_torque', 'kp', 'kd']
+                      'mit_torque', 'iq_set', 'iq_meas', 'kp', 'kd']
         csv_file = open(csv_path, 'w', newline='')
         csv_writer = csv.DictWriter(csv_file, fieldnames=csv_fields)
         csv_writer.writeheader()
@@ -576,16 +594,20 @@ def main():
         try:
             smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
                         hanging_pos, zero_pos, gains_by_node, turn_offsets,
-                        label=f"Move 1/3 — Hanging → Zero  ({MOVE_TIME:.0f}s)",
+                        label=f"Move 1/4 — Hanging → Zero    ({MOVE_TIME:.0f}s)",
                         csv_writer=csv_writer, kp_run=kp_run, move_num=1)
             smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
                         zero_pos, target_pos, gains_by_node, turn_offsets,
-                        label=f"Move 2/3 — Zero → Target   ({MOVE_TIME:.0f}s)",
+                        label=f"Move 2/4 — Zero → Target     ({MOVE_TIME:.0f}s)",
                         csv_writer=csv_writer, kp_run=kp_run, move_num=2)
             smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
                         target_pos, zero_pos, gains_by_node, turn_offsets,
-                        label=f"Move 3/3 — Target → Zero   ({MOVE_TIME:.0f}s)",
+                        label=f"Move 3/4 — Target → Zero     ({MOVE_TIME:.0f}s)",
                         csv_writer=csv_writer, kp_run=kp_run, move_num=3)
+            smooth_move(buses, bus_by_node, node_ids, name_by_node, leg_by_node,
+                        zero_pos, hanging_pos, gains_by_node, turn_offsets,
+                        label=f"Move 4/4 — Zero → Hanging    ({MOVE_TIME:.0f}s)",
+                        csv_writer=csv_writer, kp_run=kp_run, move_num=4)
         finally:
             csv_file.close()
             print(f"\nCSV written: {csv_path}")

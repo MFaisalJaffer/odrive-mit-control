@@ -404,8 +404,11 @@ def main():
             return
 
         # ── Step 6: Motion sequence ──────────────────────────────────────────
+        # Default save location: gim_test/test_data/ next to this script
+        default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_data')
+        os.makedirs(default_dir, exist_ok=True)
         csv_path = args.csv or os.path.join(
-            os.getcwd(),
+            default_dir,
             f"joint_test_{args.leg}_{args.joint}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         )
         csv_fields = ['t', 'move_num', 'phase', 'joint', 'node_id',

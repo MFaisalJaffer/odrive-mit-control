@@ -39,18 +39,18 @@
     <limit effort="120" velocity="17.488" lower="-1.047198" upper="2.216568" />
     <axis xyz="0 0 1" />
   </joint>
-  <joint name="dof_right_hip_roll_03" type="revolute">
+  <joint name="dof_right_hip_roll_04" type="revolute">
     <origin xyz="-0.028250 -0.030000 -0.071000" rpy="3.141593 -1.570796 0" />
     <parent link="KC_D_102R_R_Hip_Yoke_Drive" />
     <child link="RS03_4" />
-    <limit effort="60" velocity="18.849" lower="-2.268928" upper="0.209440" />
+    <limit effort="120" velocity="17.488" lower="-2.268928" upper="0.209440" />
     <axis xyz="0 0 -1" />
   </joint>
-  <joint name="dof_left_hip_roll_03" type="revolute">
+  <joint name="dof_left_hip_roll_04" type="revolute">
     <origin xyz="-0.028250 0.030000 -0.071000" rpy="0 1.570796 0" />
     <parent link="KC_D_102L_L_Hip_Yoke_Drive" />
     <child link="RS03_5" />
-    <limit effort="60" velocity="18.849" lower="-0.209440" upper="2.268928" />
+    <limit effort="120" velocity="17.488" lower="-0.209440" upper="2.268928" />
     <axis xyz="0 0 -1" />
   </joint>
   <joint name="dof_right_hip_yaw_03" type="revolute">

@@ -174,22 +174,18 @@ def sdo_write_bool(bus, node_id, ep, value):
 
 
 def sdo_save_config(bus, node_id):
-    """Call save_configuration via SDO endpoint 478 and check the success output (ep 479)."""
-    payload = struct.pack('<BHB4x', 1, EP_SAVE_CONFIG, 0)
-    send(bus, node_id, CMD_RXSDO, payload)
-    txsdo_id_5 = make_can_id(node_id, CMD_TXSDO)
-    txsdo_id_7 = (node_id << 7) | CMD_TXSDO
-    deadline = time.time() + 1.0
-    while time.time() < deadline:
-        r = bus.recv(timeout=0.1)
-        if r and r.arbitration_id in (txsdo_id_5, txsdo_id_7) and len(r.data) >= 5:
-            ep_echo = struct.unpack_from('<H', bytes(r.data), 1)[0]
-            if ep_echo == 479:  # success output endpoint
-                success = bool(r.data[4])
-                print(f"    save_configuration: {'OK' if success else 'FAILED'}")
-                return success
-    print("    save_configuration: no TxSdo reply (GIM firmware may not ack)")
-    return False
+    """Trigger save_configuration via the bare CAN command (0x01F).
+
+    Empirically the SDO-write-to-ep-478 approach does NOT commit to flash on
+    this GIM firmware (ep 478 is a function, not a writable property, and the
+    firmware ignores the write). The bare CMD_SAVE_CFG broadcast (manual line
+    1673) does commit. Wait long enough afterwards for the flash erase+write
+    to finish before issuing CMD_REBOOT — flash commit typically takes 1-2s
+    and being interrupted mid-write loses the new values."""
+    send(bus, node_id, CMD_SAVE_CFG, bytes(8))
+    print(f"    save_configuration: sent CMD_SAVE_CFG, waiting 2.5s for flash commit...")
+    time.sleep(2.5)
+    return True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -254,7 +250,6 @@ def main():
         sdo_write_float(bus, args.node, EP_INDEX_OFFSET, 0.0)
         sdo_write_bool(bus, args.node, EP_USE_INDEX_OFFSET, False)
         sdo_save_config(bus, args.node)
-        time.sleep(0.5)
         send(bus, args.node, CMD_REBOOT, bytes([0]))
         print("  Rebooting... waiting 4 seconds...")
         time.sleep(4.0)
@@ -297,7 +292,6 @@ def main():
         # Step 6: Save and reboot
         print("\nStep 6: Saving configuration...")
         sdo_save_config(bus, args.node)
-        time.sleep(0.5)
         print("Rebooting to apply offset...")
         send(bus, args.node, CMD_REBOOT, bytes([0]))
         print("  Waiting 4 seconds for reboot...")

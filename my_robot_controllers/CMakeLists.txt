@@ -15,6 +15,7 @@ find_package(realtime_tools REQUIRED)
 find_package(odrive_mit_example REQUIRED)
 find_package(joint_limits REQUIRED)
 find_package(urdf REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 add_library(leg_impedance_controller SHARED
   src/leg_impedance_controller.cpp
@@ -33,6 +34,7 @@ target_link_libraries(leg_impedance_controller
   ${odrive_mit_example_LIBRARIES}
   joint_limits::joint_limits
   ${urdf_LIBRARIES}
+  ${sensor_msgs_TARGETS}
 )
 
 # Install the library
@@ -64,6 +66,7 @@ ament_export_dependencies(
   hardware_interface
   pluginlib
   realtime_tools
+  sensor_msgs
 )
 
 pluginlib_export_plugin_description_file(controller_interface my_robot_controllers.xml)

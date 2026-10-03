@@ -11,17 +11,25 @@
 
 // MIT control protocol constants (SteadyWin GIM6010-8 / GIM8108-8)
 // Reference: SteadyWin GIM6010-8 Motor Manual rev2.2, §4.1.2 (Mit_Control, cmd_id 0x008)
-// Command ranges reflect GIM6010-8 physical limits; the CAN protocol supports wider ranges.
+// These are WIRE ENCODING ranges, NOT clamps: they must match the drive firmware decode
+// EXACTLY (manual rev2.2: vel +/-65 rad/s, torque +/-50 Nm) or every nonzero value is
+// rescaled in transit. Verified against drive behavior on the bench 2026-08-20.
 constexpr float MIT_P_MIN = -12.5f, MIT_P_MAX = 12.5f;   // rad
-constexpr float MIT_V_MIN = -45.0f, MIT_V_MAX = 45.0f;   // rad/s
+constexpr float MIT_V_MIN = -65.0f, MIT_V_MAX = 65.0f;   // rad/s (protocol range)
 constexpr float MIT_KP_MIN = 0.0f,  MIT_KP_MAX = 500.0f;
 constexpr float MIT_KD_MIN = 0.0f,  MIT_KD_MAX = 5.0f;
-constexpr float MIT_T_MIN = -18.0f, MIT_T_MAX = 18.0f;   // Nm
+constexpr float MIT_T_MIN = -50.0f, MIT_T_MAX = 50.0f;   // Nm (protocol range)
 
-// Feedback decode constants match the full protocol range from the DBC / manual
-constexpr float MIT_FB_POS_SCALE = 0.000381f, MIT_FB_POS_OFFSET = -12.5f;
-constexpr float MIT_FB_VEL_SCALE = 0.03175f,  MIT_FB_VEL_OFFSET = -65.0f;
-constexpr float MIT_FB_TRQ_SCALE = 0.02442f,  MIT_FB_TRQ_OFFSET = -50.0f;
+// Feedback decode: the EXACT inverse of mit_float_to_uint. These were hand-typed
+// truncated literals (pos 0.000381 vs the true 25/65535 = 0.00038147), which put a
+// raw-count-proportional error into every reported position: ~0.90 deg near zero,
+// ~1.35 deg out at the yaw resting angle. Because Get_Encoder_Estimates (0x09) ALSO
+// writes pos_estimate_, /joint_states alternated between the two sources and stepped
+// by that amount -- a phantom disturbance the policy cannot tell from real motion.
+// Derived from the ranges so they can never drift from the encoder again.
+constexpr float MIT_FB_POS_SCALE = (MIT_P_MAX - MIT_P_MIN) / 65535.0f, MIT_FB_POS_OFFSET = MIT_P_MIN;
+constexpr float MIT_FB_VEL_SCALE = (MIT_V_MAX - MIT_V_MIN) / 4095.0f,  MIT_FB_VEL_OFFSET = MIT_V_MIN;
+constexpr float MIT_FB_TRQ_SCALE = (MIT_T_MAX - MIT_T_MIN) / 4095.0f,  MIT_FB_TRQ_OFFSET = MIT_T_MIN;
 
 // Linear float-to-unsigned encoding used by the MIT CAN protocol (big-endian packing)
 inline uint16_t mit_float_to_uint(float x, float x_min, float x_max, uint8_t bits) {
@@ -92,6 +100,29 @@ struct Axis {
     // uint8_t axis_state_ = 0;
     // uint8_t procedure_result_ = 0;
     // uint8_t trajectory_done_flag_ = 0;
+    // ---- encoder multi-turn wrap normalization (2026-08-04) ----
+    // At power-on the absolute encoder's multi-turn count is arbitrary: a joint can
+    // report its true angle +/- k full output revolutions (k*2pi rad). All joint
+    // ranges on this robot fit inside +/-pi, so the true position is uniquely
+    // recovered by removing whole revolutions. The offset is latched from the FIRST
+    // valid reading each activation and applied SYMMETRICALLY: reads subtract it
+    // (controller/limits/policy see truth), writes add it back (the firmware's
+    // internal error math stays small). Never normalize only one side.
+    double wrap_offset_ = 0.0;  // [rad], multiple of 2*pi
+    bool   wrap_latched_ = false;
+    inline double apply_wrap(double raw) {
+        if (!wrap_latched_ && std::isfinite(raw)) {
+            wrap_offset_ = 2.0 * M_PI * std::round(raw / (2.0 * M_PI));
+            wrap_latched_ = true;
+            if (wrap_offset_ != 0.0) {
+                RCLCPP_WARN(rclcpp::get_logger("ODriveHardwareInterface"),
+                    "node %u: encoder wrap %+d rev detected at startup — normalizing (offset %.3f rad)",
+                    node_id_, static_cast<int>(std::round(wrap_offset_ / (2.0 * M_PI))), wrap_offset_);
+            }
+        }
+        return raw - wrap_offset_;
+    }
+
     double pos_estimate_ = NAN; // [rad]
     double vel_estimate_ = NAN; // [rad/s]
     // double iq_setpoint_ = NAN;
@@ -170,6 +201,7 @@ CallbackReturn ODriveHardwareInterface::on_cleanup(const State&) {
 }
 
 CallbackReturn ODriveHardwareInterface::on_activate(const State&) {
+    for (auto& axis : axes_) { axis.wrap_latched_ = false; axis.wrap_offset_ = 0.0; }
     RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "activating ODrives...");
 
     // This can be called several seconds before the controller finishes starting.
@@ -309,7 +341,7 @@ return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Du
         // cmd_id 0x008, big-endian. All values are on the output-shaft side (rad / rad/s / Nm).
         if (axis.mit_input_enabled_) {
             constexpr uint8_t kMITControl = 0x008;
-            uint16_t p  = mit_float_to_uint(static_cast<float>(axis.pos_setpoint_), MIT_P_MIN, MIT_P_MAX, 16);
+            uint16_t p  = mit_float_to_uint(static_cast<float>(axis.pos_setpoint_ + axis.wrap_offset_), MIT_P_MIN, MIT_P_MAX, 16);
             uint16_t v  = mit_float_to_uint(static_cast<float>(axis.vel_setpoint_), MIT_V_MIN, MIT_V_MAX, 12);
             uint16_t kp = mit_float_to_uint(static_cast<float>(axis.kp_setpoint_),     MIT_KP_MIN, MIT_KP_MAX, 12);
             uint16_t kd = mit_float_to_uint(static_cast<float>(axis.kd_setpoint_),     MIT_KD_MIN, MIT_KD_MAX, 12);
@@ -424,7 +456,7 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
     switch (cmd) {
         case Get_Encoder_Estimates_msg_t::cmd_id: {
             if (Get_Encoder_Estimates_msg_t msg; try_decode(msg)) {
-                pos_estimate_ = msg.Pos_Estimate * (2 * M_PI) / gear_ratio_;
+                pos_estimate_ = apply_wrap(msg.Pos_Estimate * (2 * M_PI) / gear_ratio_);
                 vel_estimate_ = msg.Vel_Estimate * (2 * M_PI) / gear_ratio_;
             }
         } break;
@@ -445,7 +477,7 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
             uint16_t p_raw = (static_cast<uint16_t>(frame.data[1]) << 8) | frame.data[2];
             uint16_t v_raw = (static_cast<uint16_t>(frame.data[3]) << 4) | ((frame.data[4] >> 4) & 0x0F);
             uint16_t t_raw = ((static_cast<uint16_t>(frame.data[4]) & 0x0F) << 8) | frame.data[5];
-            pos_estimate_    = static_cast<double>(p_raw) * MIT_FB_POS_SCALE + MIT_FB_POS_OFFSET;
+            pos_estimate_    = apply_wrap(static_cast<double>(p_raw) * MIT_FB_POS_SCALE + MIT_FB_POS_OFFSET);
             vel_estimate_    = static_cast<double>(v_raw) * MIT_FB_VEL_SCALE + MIT_FB_VEL_OFFSET;
             torque_estimate_ = static_cast<double>(t_raw) * MIT_FB_TRQ_SCALE + MIT_FB_TRQ_OFFSET;
         } break;

@@ -17,6 +17,7 @@
   <depend>odrive_mit_example</depend>
   <depend>joint_limits</depend>
   <depend>urdf</depend>
+  <depend>sensor_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
